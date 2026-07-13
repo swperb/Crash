@@ -1,12 +1,43 @@
+<div align="center">
+
 # Crash
 
-*A Windows file manager named after the thing it refuses to do.*
+**A Windows file manager named after the thing it refuses to do.**
 
-Fast, stable, and visually modern — a native Windows 11 file manager built on a
-custom **Direct2D / DirectWrite** renderer over a plain **Win32** window, with a
-**DirectComposition flip-model swapchain**. No XAML/WinUI in the hot path.
+[![build](https://github.com/swperb/Crash/actions/workflows/build.yml/badge.svg)](https://github.com/swperb/Crash/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D6?logo=windows11&logoColor=white)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
+
+Fast, stable, and visually modern — built on a custom **Direct2D / DirectWrite**
+renderer over a plain **Win32** window with a **DirectComposition flip-model
+swapchain**. No XAML/WinUI in the hot path.
+
+<img src="docs/screenshot.png" alt="Crash — the details view" width="820">
+
+</div>
+
+Tabs, dual-pane, real thumbnails, a command palette, and instant recursive search
+— at **steady refresh-rate scroll on 100k-row folders** with the UI thread never
+blocking on disk. Everything you already know from File Explorer, none of the lag.
 
 See [`crash_design_doc.md`](crash_design_doc.md) for the full technical design.
+
+## Highlights
+
+- **Custom virtualized renderer** — Direct2D list/grid, only visible rows drawn,
+  no per-item objects; ~165 fps sustained scroll on 100k synthetic rows.
+- **Never blocks** — enumeration, thumbnails, and search run on worker threads
+  and stream results back; a broken shell extension can't take the process down.
+- **Real Windows integration** — shell context menus, system icons, drag-and-drop,
+  inline rename, Mica/dark-title chrome that follows your system theme & accent.
+- **Power-user layout** — tabs, dual-pane with a draggable splitter, resizable
+  columns, marquee select, sessions that restore on relaunch.
+- **Search** — instant in-folder filter (free); recursive subtree search that
+  works even on network shares, accelerated by [Everything](https://voidtools.com)
+  on local drives when installed (Pro).
+- **Open core, MIT** — the engine is open source; Pro features sit behind a
+  license check ([details](CONTRIBUTING.md#open-core-model)).
 
 ---
 
