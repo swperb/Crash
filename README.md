@@ -13,7 +13,7 @@ Fast, stable, and visually modern — built on a custom **Direct2D / DirectWrite
 renderer over a plain **Win32** window with a **DirectComposition flip-model
 swapchain**. No XAML/WinUI in the hot path.
 
-<img src="docs/screenshot.png" alt="Crash — navigation sidebar, file list, and details pane" width="820">
+<img src="docs/screenshot.png" alt="Crash — merged title-bar tabs, navigation sidebar, file list, and details pane" width="820">
 
 </div>
 
@@ -31,9 +31,11 @@ See [`crash_design_doc.md`](crash_design_doc.md) for the full technical design.
   and stream results back; a broken shell extension can't take the process down.
 - **Real Windows integration** — shell context menus, system icons, drag-and-drop,
   inline rename, Mica/dark-title chrome that follows your system theme & accent.
-- **Familiar Explorer layout** — a navigation sidebar (Home, Quick access, This PC
-  drives), a details/preview pane, and a Home landing page with folder & drive
-  cards — the shape you already know, drawn by the custom renderer.
+- **Familiar Explorer layout** — a merged title bar with scrollable window tabs,
+  Fluent nav icons + a toolbar search box, an expandable navigation sidebar (Home,
+  Quick access, This PC → drives → folders), a details/preview pane, and a Home
+  landing page with folder & drive cards — the shape you already know, drawn by
+  the custom renderer.
 - **Power-user layout** — tabs, dual-pane with a draggable splitter, resizable
   columns, marquee select, sessions that restore on relaunch.
 - **Search** — instant in-folder filter (free); recursive subtree search that
