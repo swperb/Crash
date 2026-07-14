@@ -2058,8 +2058,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else
         {
             POINT cp{ sx, sy }; ScreenToClient(hwnd, &cp);
-            pane = PaneAt(dipX(cp.x), dipY(cp.y));
-            if (pane < 0 || dipY(cp.y) < ListRc(pane).t) return DefWindowProcW(hwnd, msg, wParam, lParam);
+            const float ddx = dipX(cp.x), ddy = dipY(cp.y);
+            // Sidebar row: show the real shell context menu for that location
+            // (This PC / Home resolve via their shell CLSID; drives & folders by path).
+            if (g_sidebar && ddx < kSidebarW && ddy >= ContentTop() && ddy < ContentBottom())
+            {
+                const size_t nrows = (std::min)(g_navRows.size(), g_navRects.size());
+                for (size_t i = 0; i < nrows; ++i)
+                {
+                    NavNode* n = g_navRows[i].node;
+                    const auto& r = g_navRects[i];
+                    if (n->kind == 5) continue;
+                    if (ddx >= r.left && ddx <= r.right && ddy >= r.top && ddy <= r.bottom)
+                    {
+                        if (n->kind == 4)          g_ctx.ShowForItem(hwnd, kThisPCParse, screen);
+                        else if (n->kind == 3)     g_ctx.ShowForItem(hwnd, kHomeParse, screen);
+                        else if (!n->path.empty()) g_ctx.ShowForItem(hwnd, n->path, screen);
+                        break;
+                    }
+                }
+                g_dirty = true;
+                return 0;
+            }
+            pane = PaneAt(ddx, ddy);
+            if (pane < 0 || ddy < ListRc(pane).t) return DefWindowProcW(hwnd, msg, wParam, lParam);
             ActivatePane(pane); t = &AT();
             int lx, ly; ListLocal(pane, cp.x, cp.y, &lx, &ly);
             const int row = t->view->HitRow(lx, ly);
