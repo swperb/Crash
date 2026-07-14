@@ -286,7 +286,7 @@ public:
     static constexpr float kTitleH = 40.f;      // merged title bar (tabs + caption)
     static constexpr float kToolbarH = 48.f;
     static constexpr float kStatusH = 26.f;
-    static constexpr float kAddrLeft = 160.f;   // after 4 toolbar buttons
+    static constexpr float kAddrLeft = 196.f;   // after 5 toolbar buttons (back/fwd/up/refresh/dual)
 
     void Init(IDWriteFactory* dw)
     {
@@ -302,6 +302,7 @@ public:
             return f;
         };
         glyph_ = mk(L"Segoe UI", 16.f, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+        fluent_ = mk(L"Segoe Fluent Icons", 15.f, DWRITE_TEXT_ALIGNMENT_CENTER, false);
         path_ = mk(L"Segoe UI Variable Text", 13.f, DWRITE_TEXT_ALIGNMENT_LEADING, true);
         status_ = mk(L"Segoe UI", 12.f, DWRITE_TEXT_ALIGNMENT_LEADING, true);
         statusR_ = mk(L"Segoe UI", 12.f, DWRITE_TEXT_ALIGNMENT_TRAILING, true);
@@ -312,11 +313,11 @@ public:
     static D2D1_RECT_F DetailsRect(float viewW) { return { viewW - 88.f, kTitleH + 8.f, viewW - 56.f, kTitleH + 40.f }; }
     int HitButton(float x, float y) const
     {
-        for (int i = 0; i < 4; ++i) { auto r = Btn(i); if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i + 1; }
+        for (int i = 0; i < 5; ++i) { auto r = Btn(i); if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i + 1; }
         auto g = GearRect(lastViewW_);
-        if (x >= g.left && x <= g.right && y >= g.top && y <= g.bottom) return 5;   // settings
+        if (x >= g.left && x <= g.right && y >= g.top && y <= g.bottom) return 6;   // settings
         auto d = DetailsRect(lastViewW_);
-        if (x >= d.left && x <= d.right && y >= d.top && y <= d.bottom) return 6;    // details toggle
+        if (x >= d.left && x <= d.right && y >= d.top && y <= d.bottom) return 7;    // details toggle
         return 0;
     }
     void InvalidateBrushes() { owner_ = nullptr; }
@@ -348,16 +349,17 @@ public:
         }
 
         dc->FillRectangle({ 0, kTitleH, viewW, kTitleH + kToolbarH }, brToolbar_.Get());
-        const wchar_t* glyphs[3] = { L"\x2190", L"\x2192", L"\x2191" };
-        const bool en[4] = { s.backEnabled, s.fwdEnabled, s.upEnabled, true };
-        for (int i = 0; i < 4; ++i)
+        // Navigation glyphs (Segoe Fluent Icons): back, forward, up, refresh; 5th is dual-pane.
+        const wchar_t* glyphs[4] = { L"\xE72B", L"\xE72A", L"\xE74A", L"\xE72C" };
+        const bool en[5] = { s.backEnabled, s.fwdEnabled, s.upEnabled, true, true };
+        for (int i = 0; i < 5; ++i)
         {
             D2D1_RECT_F r = Btn(i);
-            const bool on = (i == 3 && s.dualOn);
+            const bool on = (i == 4 && s.dualOn);
             if ((en[i] && s.hoverButton == i + 1) || on)
                 dc->FillRoundedRectangle({ r, 5, 5 }, on ? brActive_.Get() : brHover_.Get());
-            if (i < 3)
-                dc->DrawText(glyphs[i], 1, glyph_.Get(), r, en[i] ? brText_.Get() : brDisabled_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (i < 4)
+                dc->DrawText(glyphs[i], 1, fluent_.Get(), r, en[i] ? brText_.Get() : brDisabled_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             else   // dual-pane toggle: two side-by-side rectangles
             {
                 const float cx = (r.left + r.right) * 0.5f;
@@ -370,7 +372,7 @@ public:
         {
             D2D1_RECT_F d = DetailsRect(viewW);
             if (s.detailsOn) dc->FillRoundedRectangle({ d, 5, 5 }, brActive_.Get());
-            else if (s.hoverButton == 6) dc->FillRoundedRectangle({ d, 5, 5 }, brHover_.Get());
+            else if (s.hoverButton == 7) dc->FillRoundedRectangle({ d, 5, 5 }, brHover_.Get());
             // Icon: a panel with a highlighted right column (like Explorer's details toggle).
             const float dl = d.left + 8, dt = d.top + 9, dr = d.right - 8, db = d.bottom - 9;
             dc->DrawRectangle({ dl, dt, dr, db }, brText_.Get(), 1.3f);
@@ -379,8 +381,8 @@ public:
         }
         {
             D2D1_RECT_F g = GearRect(viewW);
-            if (s.hoverButton == 5) dc->FillRoundedRectangle({ g, 5, 5 }, brHover_.Get());
-            dc->DrawText(L"\x2699", 1, glyph_.Get(), g, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (s.hoverButton == 6) dc->FillRoundedRectangle({ g, 5, 5 }, brHover_.Get());
+            dc->DrawText(L"\xE713", 1, fluent_.Get(), g, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
         // Address: breadcrumb or inline editor (leaves room for details + gear).
@@ -423,7 +425,7 @@ public:
 
 private:
     IDWriteFactory* dwrite_ = nullptr;
-    ComPtr<IDWriteTextFormat> glyph_, path_, status_, statusR_;
+    ComPtr<IDWriteTextFormat> glyph_, fluent_, path_, status_, statusR_;
     ID2D1DeviceContext* owner_ = nullptr;
     ComPtr<ID2D1SolidColorBrush> brToolbar_, brStatus_, brCtrl_, brHover_, brActive_, brText_, brText2_, brDisabled_, brLine_, brSel_;
     D2D1_RECT_F lastAddr_{};
@@ -1929,9 +1931,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (btn == 1) GoBack();
             else if (btn == 2) GoForward();
             else if (btn == 3) GoUp();
-            else if (btn == 4) ToggleDual();
-            else if (btn == 5) OpenSettings();
-            else if (btn == 6) { g_details = !g_details; SetViewports(); g_dirty = true; }
+            else if (btn == 4) StartLoad(g_activePane, &AT());   // refresh
+            else if (btn == 5) ToggleDual();
+            else if (btn == 6) OpenSettings();
+            else if (btn == 7) { g_details = !g_details; SetViewports(); g_dirty = true; }
             else
             {
                 std::wstring segPath;
