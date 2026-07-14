@@ -275,6 +275,10 @@ struct AddressEditor
 };
 AddressEditor g_addr;
 
+// Toolbar search box (in-folder filter as you type; Enter = recursive search on Pro).
+AddressEditor g_search;
+bool g_searchActive = false;
+
 // Inline rename (F2) reuses the same small text editor.
 AddressEditor g_ren;
 bool g_renaming = false;
@@ -289,6 +293,7 @@ public:
     static constexpr float kToolbarH = 48.f;
     static constexpr float kStatusH = 26.f;
     static constexpr float kAddrLeft = 196.f;   // after 5 toolbar buttons (back/fwd/up/refresh/dual)
+    static constexpr float kSearchW = 240.f;    // search box reserved at the toolbar's right
 
     void Init(IDWriteFactory* dw)
     {
@@ -387,8 +392,8 @@ public:
             dc->DrawText(L"\xE713", 1, fluent_.Get(), g, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // Address: breadcrumb or inline editor (leaves room for details + gear).
-        D2D1_RECT_F addr{ kAddrLeft, kTitleH + 8.f, viewW - 96.f, kTitleH + 40.f };
+        // Address: breadcrumb or inline editor (leaves room for the search box + details + gear).
+        D2D1_RECT_F addr{ kAddrLeft, kTitleH + 8.f, viewW - 96.f - kSearchW - 8.f, kTitleH + 40.f };
         lastAddr_ = addr;
         dc->FillRoundedRectangle({ addr, 4, 4 }, brCtrl_.Get());
         dc->PushAxisAlignedClip({ addr.left + 2, addr.top, addr.right - 2, addr.bottom }, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -496,6 +501,7 @@ namespace
     }
     D2D1_RECT_F SidebarRc() { return { 0, ContentTop(), kSidebarW, ContentBottom() }; }
     D2D1_RECT_F DetailsRc() { return { ViewW() - kDetailsW, ContentTop(), ViewW(), ContentBottom() }; }
+    D2D1_RECT_F SearchRc()  { return { ViewW() - 96.f - Chrome::kSearchW, Chrome::kTitleH + 8.f, ViewW() - 96.f, Chrome::kTitleH + 40.f }; }
     bool IsHome(const Tab& t) { return t.path.empty(); }
     bool IsThisPC(const Tab& t) { return t.path == kThisPC; }
     Rc ListRc(int i) { return PaneRc(i); }   // panes no longer carry their own tab strip
@@ -585,6 +591,7 @@ namespace
 void StartLoad(int paneIdx, Tab* t);
 void SetViewports();
 void UpdateTitleBar();
+void SyncSearchToTab();
 
 void NavigateTab(int paneIdx, Tab* t, const std::wstring& path, bool pushHistory = true)
 {
@@ -628,6 +635,8 @@ void StartLoad(int paneIdx, Tab* t)
     t->view->SetBasePath(t->path);
     p.enumr->Navigate(t->gen, t->path);
     UpdateTitleBar();
+    // Reset the search box to the (now empty) filter of the active tab.
+    if (paneIdx == g_activePane && !p.tabs.empty() && t == p.tabs[p.active].get()) SyncSearchToTab();
     g_dirty = true;
 }
 
@@ -642,6 +651,7 @@ void SwitchTab(int paneIdx, size_t idx)
     if (!t->loaded && !t->loading) StartLoad(paneIdx, t);
     UpdateTitleBar();
     EnsureActiveTabVisible();
+    SyncSearchToTab();
     g_dirty = true;
 }
 
@@ -985,6 +995,26 @@ void CopyToClipboard(const std::wstring& s)
 
 void ClearFilter() { AT().model->SetFilter(L""); AT().view->OnFilterChanged(); g_dirty = true; }
 
+// ---- toolbar search box ----
+float MeasureWith(IDWriteTextFormat* fmt, const std::wstring& s)
+{
+    if (s.empty() || !fmt) return 0.f;
+    ComPtr<IDWriteTextLayout> l;
+    if (FAILED(g_gfx.DWrite()->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, 1e5f, 100.f, &l))) return 0.f;
+    DWRITE_TEXT_METRICS m{}; l->GetMetrics(&m); return m.widthIncludingTrailingWhitespace;
+}
+void ApplySearchFilter() { AT().model->SetFilter(g_search.text); AT().view->OnFilterChanged(); g_dirty = true; }
+void ActivateSearch()
+{
+    if (g_addr.active) g_addr.Cancel();
+    g_searchActive = true;
+    g_search.selAll = !g_search.text.empty();
+    g_search.caret = g_search.text.size();
+    g_dirty = true;
+}
+// Reflect the active tab's current filter in the box (on tab switch / navigation).
+void SyncSearchToTab() { g_search.text = AT().model->Filter(); g_search.caret = g_search.text.size(); g_search.selAll = false; g_searchActive = false; }
+
 void RunCommand(int id)
 {
     switch (id)
@@ -1008,7 +1038,7 @@ void RunCommand(int id)
     case CMD_SORTDATE:  AT().view->SetSort(SortKey::Date, false); break;
     case CMD_COPYPATH:  CopyToClipboard(AT().path.empty() ? std::wstring(L"This PC") : AT().path); break;
     case CMD_SETTINGS:  OpenSettings(); break;
-    case CMD_SEARCH:    OpenPalette(1); g_searchArmed = true; g_pal.input.clear(); g_pal.caret = 0; break;
+    case CMD_SEARCH:    ActivateSearch(); break;   // focus the toolbar search box (Enter = recursive on Pro)
     }
     g_dirty = true;
 }
@@ -1031,6 +1061,39 @@ void DrawCaption(ID2D1DeviceContext* dc)
 }
 
 // The merged title bar: window-level tabs (active pane) + caption buttons.
+// The native-style search box at the toolbar's right end.
+void DrawSearchBox(ID2D1DeviceContext* dc, bool caretOn)
+{
+    const D2D1_RECT_F r = SearchRc();
+    dc->FillRoundedRectangle({ r, 4, 4 }, g_brCtrl.Get());
+    if (g_searchActive) dc->DrawRoundedRectangle({ { r.left + 0.5f, r.top + 0.5f, r.right - 0.5f, r.bottom - 0.5f }, 4, 4 }, g_brAccent.Get(), 1.2f);
+    dc->DrawText(L"\xE721", 1, g_capFmt.Get(), { r.left + 6.f, r.top, r.left + 28.f, r.bottom }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);   // magnifier
+
+    const float tx = r.left + 32.f;
+    dc->PushAxisAlignedClip({ tx - 2.f, r.top, r.right - 8.f, r.bottom }, D2D1_ANTIALIAS_MODE_ALIASED);
+    const std::wstring& txt = g_search.text;
+    if (!txt.empty() || g_searchActive)
+    {
+        if (g_search.selAll && !txt.empty())
+        {
+            const float w = MeasureWith(g_navFmt.Get(), txt);
+            dc->FillRectangle({ tx - 1.f, r.top + 6.f, tx + w + 1.f, r.bottom - 6.f }, g_brSelBg.Get());
+        }
+        dc->DrawText(txt.c_str(), (UINT32)txt.size(), g_navFmt.Get(), { tx, r.top, r.right - 8.f, r.bottom }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        if (g_searchActive && caretOn)
+        {
+            const float cw = MeasureWith(g_navFmt.Get(), txt.substr(0, g_search.caret));
+            dc->DrawLine({ tx + cw, r.top + 7.f }, { tx + cw, r.bottom - 7.f }, g_brText.Get(), 1.2f);
+        }
+    }
+    else
+    {
+        const std::wstring ph = L"Search " + TabTitle(AT().path);
+        dc->DrawText(ph.c_str(), (UINT32)ph.size(), g_navFmt.Get(), { tx, r.top, r.right - 8.f, r.bottom }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+    dc->PopAxisAlignedClip();
+}
+
 void DrawTopBar(ID2D1DeviceContext* dc)
 {
     const float W = ViewW(), T = Chrome::kTitleH;
@@ -1705,9 +1768,8 @@ void RenderFrame(bool caretOn, bool animating)
     g_chrome.Draw(dc, ViewW(), ViewH(), cs);
     DrawRename(dc, caretOn);
 
-    // Search box (active input or passive chip).
-    if (g_pal.open && g_pal.mode == 1) DrawFilterBar(dc, /*editing*/ true, caretOn);
-    else if (!AT().model->Filter().empty()) DrawFilterBar(dc, /*editing*/ false, caretOn);
+    // Toolbar search box (shows the current in-folder filter / placeholder).
+    DrawSearchBox(dc, caretOn);
 
     // Modal overlay (command palette / settings) with a fade+slide reveal.
     if (g_overlayKind != 0 && g_overlayAnim > 0.01f)
@@ -1991,7 +2053,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (inRect(g_pal.panelRect))
             {
                 for (size_t i = 0; i < g_pal.itemRects.size(); ++i)
-                    if (inRect(g_pal.itemRects[i])) { int cmd = g_pal.items[i].cmd; if (cmd == CMD_FILTER) OpenPalette(1); else { ClosePalette(); RunCommand(cmd); } break; }
+                    if (inRect(g_pal.itemRects[i])) { int cmd = g_pal.items[i].cmd; if (cmd == CMD_FILTER) { ClosePalette(); ActivateSearch(); } else { ClosePalette(); RunCommand(cmd); } break; }
             }
             else ClosePalette();
             return 0;
@@ -2000,6 +2062,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (((g_pal.open && g_pal.mode == 1) || !AT().model->Filter().empty()) && inRect(g_pal.filterClearRect))
         { ClearFilter(); if (g_pal.open && g_pal.mode == 1) ClosePalette(); return 0; }
         if (g_pal.open && g_pal.mode == 1) ClosePalette();   // click elsewhere closes input, keeps filter
+
+        // Clicking anywhere but the search box unfocuses it (the filter stays applied).
+        if (g_searchActive && !inRect(SearchRc())) { g_searchActive = false; g_dirty = true; }
 
         // Title-bar tabs (caption buttons are non-client; empty title area is drag).
         if (dy < Chrome::kTitleH)
@@ -2033,6 +2098,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             else if (btn == 5) ToggleDual();
             else if (btn == 6) OpenSettings();
             else if (btn == 7) { g_details = !g_details; SetViewports(); g_dirty = true; }
+            else if (inRect(SearchRc())) ActivateSearch();
             else
             {
                 std::wstring segPath;
@@ -2210,6 +2276,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_CHAR:
         if (g_renaming) { g_ren.Char(static_cast<wchar_t>(wParam)); g_dirty = true; return 0; }
+        if (g_searchActive) { g_search.Char(static_cast<wchar_t>(wParam)); ApplySearchFilter(); return 0; }
         if (g_pal.open) { wchar_t c = static_cast<wchar_t>(wParam); if (c >= 0x20) { g_pal.input.insert(g_pal.caret, 1, c); ++g_pal.caret; OnPaletteInputChanged(); } return 0; }
         if (g_addr.active) { g_addr.Char(static_cast<wchar_t>(wParam)); g_dirty = true; }
         return 0;
@@ -2244,7 +2311,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (g_pal.mode == 1) { if (g_searchArmed) g_searchArmed = false; else ClearFilter(); }
                 ClosePalette(); return 0;
             case VK_RETURN:
-                if (g_pal.mode == 0) { if (!g_pal.items.empty()) { int cmd = g_pal.items[g_pal.sel].cmd; if (cmd == CMD_FILTER) { OpenPalette(1); return 0; } ClosePalette(); RunCommand(cmd); } else ClosePalette(); }
+                if (g_pal.mode == 0) { if (!g_pal.items.empty()) { int cmd = g_pal.items[g_pal.sel].cmd; if (cmd == CMD_FILTER) { ClosePalette(); ActivateSearch(); return 0; } ClosePalette(); RunCommand(cmd); } else ClosePalette(); }
                 else if (g_pal.mode == 1) { if (g_searchArmed) { g_searchArmed = false; std::wstring q = g_pal.input; ClosePalette(); RunRecursiveSearch(q); } else ClosePalette(); }
                 else if (g_pal.mode == 2) { if (ImportLicenseInteractive(hwnd)) { g_pro = true; OpenPalette(0); } else { g_pal.message = L"That license file couldn't be verified."; g_dirty = true; } }
                 return 0;
@@ -2259,14 +2326,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             default: return 0;
             }
         }
+        // Toolbar search box owns the keyboard while focused.
+        if (g_searchActive)
+        {
+            switch (wParam)
+            {
+            case VK_RETURN:
+                if (g_pro && !g_search.text.empty()) { std::wstring q = g_search.text; g_searchActive = false; RunRecursiveSearch(q); }
+                else g_searchActive = false;
+                g_dirty = true; return 0;
+            case VK_ESCAPE: g_searchActive = false; g_search.text.clear(); g_search.caret = 0; ClearFilter(); return 0;
+            case VK_BACK:   g_search.Backspace(); ApplySearchFilter(); return 0;
+            case VK_DELETE: g_search.Del(); ApplySearchFilter(); return 0;
+            case VK_LEFT:   g_search.Left(); g_dirty = true; return 0;
+            case VK_RIGHT:  g_search.Right(); g_dirty = true; return 0;
+            case VK_HOME:   g_search.Home(); g_dirty = true; return 0;
+            case VK_END:    g_search.End(); g_dirty = true; return 0;
+            case 'A': if (ctrl) { g_search.SelectAll(); g_dirty = true; } return 0;
+            case 'V': if (ctrl) { g_search.Paste(hwnd); ApplySearchFilter(); } return 0;
+            default: return 0;
+            }
+        }
         if (ctrl && shift && wParam == 'P') { OpenPalette(0); return 0; }
-        if (ctrl && shift && wParam == 'F')   // recursive search (Pro)
+        if (ctrl && shift && wParam == 'F')   // recursive search (Pro): focus box, gate on Enter
         {
             if (!g_pro) OpenPalette(0);        // gates to the license prompt
-            else { OpenPalette(1); g_searchArmed = true; g_pal.input.clear(); g_pal.caret = 0; }
+            else ActivateSearch();
             return 0;
         }
-        if (ctrl && wParam == 'F') { OpenPalette(1); g_searchArmed = false; return 0; }
+        if (ctrl && wParam == 'F') { ActivateSearch(); return 0; }
         if (ctrl && wParam == VK_OEM_COMMA) { OpenSettings(); return 0; }
         if (g_addr.active)
         {
@@ -2483,7 +2571,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         if (g_overlayAnim <= 0.005f && tgt == 0.f) g_overlayKind = 0;
         const bool overlayLive = std::fabs(g_overlayAnim - tgt) > 0.001f || g_pal.open || g_settingsOpen;
 
-        if (g_dirty || animating || g_addr.active || overlayLive || g_renaming)
+        if (g_dirty || animating || g_addr.active || g_searchActive || overlayLive || g_renaming)
         {
             if (contiguous && animating) PushPacing(float(double(now.QuadPart - lastRender.QuadPart) / freq.QuadPart * 1000.0));
             lastRender = now; contiguous = animating;
