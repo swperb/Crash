@@ -32,7 +32,12 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
+
+// Posted by a sidebar-expansion worker with a heap-allocated NavKidsMsg* (lParam).
+#define WM_APP_NAVKIDS (WM_APP + 3)
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
@@ -114,9 +119,13 @@ namespace
     {
         std::wstring label, path;
         int  kind = 0;
-        bool expandable = false, expanded = false, loaded = false;
+        bool expandable = false, expanded = false, loaded = false, loading = false;
+        uint64_t id = 0;                          // stable id for async child matching
         std::vector<NavNode> children;
     };
+    uint64_t g_navIdCtr = 0;
+    // Worker → UI payload of a node's freshly-scanned subdirectories (label, path).
+    struct NavKidsMsg { uint64_t id; std::vector<std::pair<std::wstring, std::wstring>> items; };
     struct NavRow { NavNode* node = nullptr; int depth = 0; };
     std::vector<NavNode>     g_navRoots;
     std::vector<NavRow>      g_navRows;            // flattened visible tree (rebuilt on toggle)
@@ -1207,25 +1216,45 @@ void FlattenNavInto(std::vector<NavNode>& nodes, int depth)
 }
 void FlattenNav() { g_navRows.clear(); FlattenNavInto(g_navRoots, 0); }
 
-// Lazily populate a node's children: This PC → drives; a drive/folder → its
-// immediate subdirectories. Synchronous (one level, on demand) — fast for local
-// drives; a disconnected network drive could briefly stall on expand.
-void LoadNavChildren(NavNode& n)
+// Find a node anywhere in the tree by its stable id (async result routing).
+NavNode* FindNavById(std::vector<NavNode>& nodes, uint64_t id)
 {
-    if (n.loaded) return;
-    n.loaded = true;
-    n.children.clear();
-
-    if (n.kind == 4)   // This PC → drives
+    for (auto& n : nodes)
     {
-        for (auto& d : g_drives) { NavNode c; c.label = d.first; c.path = d.second; c.kind = 2; c.expandable = true; n.children.push_back(c); }
+        if (n.id != 0 && n.id == id) return &n;
+        if (NavNode* r = FindNavById(n.children, id)) return r;
     }
-    else               // drive/folder → subdirectories only
+    return nullptr;
+}
+
+// Populate a node's children. This PC → drives (already in memory, instant); a
+// drive/folder → its immediate subdirectories, scanned on a WORKER THREAD so a
+// slow/disconnected drive never blocks the UI (design doc §5 golden rule). The
+// worker posts WM_APP_NAVKIDS back with the results.
+void RequestNavChildren(NavNode& n)
+{
+    if (n.loaded || n.loading) return;
+
+    if (n.kind == 4)   // This PC → drives (synchronous: just the cached list)
     {
-        std::wstring base = n.path;
-        if (base.empty()) { if (n.children.empty()) n.expandable = false; return; }
+        n.loaded = true;
+        n.children.clear();
+        for (auto& d : g_drives) { NavNode c; c.id = ++g_navIdCtr; c.label = d.first; c.path = d.second; c.kind = 2; c.expandable = true; n.children.push_back(c); }
+        if (n.children.empty()) n.expandable = false;
+        return;
+    }
+
+    if (n.path.empty()) { n.loaded = true; n.expandable = false; return; }
+    if (n.id == 0) n.id = ++g_navIdCtr;
+    n.loading = true;
+    const uint64_t id = n.id;
+    const std::wstring path = n.path;
+    const bool showHidden = g_settings.showHidden;
+    HWND hwnd = g_hwnd;
+    std::thread([hwnd, id, path, showHidden] {
+        auto* msg = new NavKidsMsg{ id, {} };
+        std::wstring base = path;
         if (base.back() != L'\\') base += L'\\';
-        const bool showHidden = g_settings.showHidden;
         WIN32_FIND_DATAW fd{};
         HANDLE h = FindFirstFileExW((base + L"*").c_str(), FindExInfoBasic, &fd,
                                     FindExSearchLimitToDirectories, nullptr, 0);
@@ -1235,21 +1264,35 @@ void LoadNavChildren(NavNode& n)
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
                 if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))) continue;
                 if (!showHidden && (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) continue;
-                NavNode c; c.label = fd.cFileName; c.path = base + fd.cFileName; c.kind = 0; c.expandable = true;
-                n.children.push_back(std::move(c));
+                msg->items.push_back({ fd.cFileName, base + fd.cFileName });
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
-        std::sort(n.children.begin(), n.children.end(),
-                  [](const NavNode& a, const NavNode& b) { return _wcsicmp(a.label.c_str(), b.label.c_str()) < 0; });
-    }
-    if (n.children.empty()) n.expandable = false;   // nothing to expand → drop the chevron
+        std::sort(msg->items.begin(), msg->items.end(),
+                  [](const std::pair<std::wstring, std::wstring>& a, const std::pair<std::wstring, std::wstring>& b)
+                  { return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0; });
+        if (!PostMessageW(hwnd, WM_APP_NAVKIDS, 0, reinterpret_cast<LPARAM>(msg))) delete msg;   // window gone
+    }).detach();
+}
+
+// Apply worker results to the matching node (UI thread, from WM_APP_NAVKIDS).
+void ApplyNavKids(NavKidsMsg* msg)
+{
+    NavNode* n = FindNavById(g_navRoots, msg->id);
+    if (!n) return;
+    n->loading = false;
+    n->loaded = true;
+    n->children.clear();
+    for (auto& it : msg->items) { NavNode c; c.id = ++g_navIdCtr; c.label = it.first; c.path = it.second; c.kind = 0; c.expandable = true; n->children.push_back(c); }
+    if (n->children.empty()) { n->expandable = false; n->expanded = false; }
+    FlattenNav();
+    g_dirty = true;
 }
 
 void ToggleNav(NavNode& n)
 {
     if (!n.expandable) return;
-    if (!n.expanded) { LoadNavChildren(n); n.expanded = !n.children.empty(); }
+    if (!n.expanded) { n.expanded = true; RequestNavChildren(n); }   // children stream in async
     else             { n.expanded = false; }
     FlattenNav();
     g_dirty = true;
@@ -1602,6 +1645,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
     case WM_APP_ENUM: PumpEnumEvents(); return 0;
     case WM_APP_THUMB: g_dirty = true; return 0;   // ready thumbnails uploaded next frame
+    case WM_APP_NAVKIDS: { std::unique_ptr<NavKidsMsg> m(reinterpret_cast<NavKidsMsg*>(lParam)); ApplyNavKids(m.get()); return 0; }
 
     case WM_SIZE:
         if (g_pane[0].tabs.size())
