@@ -46,9 +46,35 @@ See [`crash_design_doc.md`](crash_design_doc.md) for the full technical design.
 
 ---
 
-## Current status: Phase 5 — Fluent polish ✅ (settings + animations)
+## Current status: Windows 11 Explorer UI ✅
 
-Crash now has a live settings screen and restrained reveal animations, rounding
+Beyond the design-doc roadmap, Crash now mirrors the shape and chrome of Windows 11
+File Explorer — drawn entirely by the custom Direct2D renderer, no WinUI.
+
+- **Merged title bar with tabs** — window-level tabs live in a custom title bar
+  (reclaimed via `WM_NCCALCSIZE`, with our own minimize / maximize / close and
+  drag + snap via `WM_NCHITTEST`). Each tab has a file icon, a close (×), a + new-tab
+  button, and the strip **scrolls with ‹ › chevrons** when tabs overflow.
+- **Toolbar** — Fluent **back / forward / up / refresh** icons, an editable
+  breadcrumb address bar, and a **search box**: live in-folder filter as you type,
+  with `Enter` running a recursive subtree search on Pro.
+- **Navigation sidebar** — Home, pinned Quick access folders, a separator, then an
+  **expandable This PC → drives → folders** tree with chevrons and real
+  known-folder / drive icons. This PC is its own screen, and subfolders load on a
+  worker thread so a slow / network drive never blocks the UI. Right-click any row
+  for its **native shell context menu**.
+- **Details pane** — the selected item's large (colour) shell icon plus Type /
+  Size / Modified, toggled from the toolbar.
+- **Home landing page** — Quick access + Devices cards shown at the root.
+
+*Verified live end-to-end: tab open / close / scroll, minimize / maximize / restore
++ drag, sidebar expand across three levels, the This PC screen, right-click context
+menus, type-to-filter in the search box — plus a fuzz / stress pass it survived
+(min-size and viewport guards added as a result).*
+
+## Fluent polish — settings + animations ✅
+
+Crash also has a live settings screen and restrained reveal animations, rounding
 out the Fluent look (design doc §4).
 
 ### What the polish pass adds
