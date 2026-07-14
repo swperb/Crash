@@ -26,6 +26,10 @@ public:
     // by the details pane so known folders show their crisp, fully-coloured icon.
     ID2D1Bitmap* GetLargeForPath(ID2D1DeviceContext* dc, const std::wstring& path);
 
+    // Icon for a shell parsing name (e.g. "shell:::{CLSID}") — used for virtual
+    // locations like Home and This PC that have no filesystem path.
+    ID2D1Bitmap* GetForParseName(ID2D1DeviceContext* dc, const std::wstring& parseName, bool large);
+
 private:
     ComPtr<ID2D1Bitmap> Resolve(ID2D1DeviceContext* dc, const FileEntry& e, bool large);
     ComPtr<ID2D1Bitmap> FromHIcon(ID2D1DeviceContext* dc, HICON hic);

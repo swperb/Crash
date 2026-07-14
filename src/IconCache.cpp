@@ -1,5 +1,6 @@
 #include "IconCache.h"
 #include <shellapi.h>
+#include <shlobj.h>           // SHParseDisplayName (shell CLSID icons)
 #include <commoncontrols.h>   // IImageList / SHGetImageList (extra-large icons)
 #include <vector>
 
@@ -66,6 +67,31 @@ ID2D1Bitmap* IconCache::GetLargeForPath(ID2D1DeviceContext* dc, const std::wstri
             }
             iml->Release();
         }
+    }
+    ID2D1Bitmap* raw = bmp.Get();
+    map_.emplace(std::move(key), std::move(bmp));
+    return raw;
+}
+
+ID2D1Bitmap* IconCache::GetForParseName(ID2D1DeviceContext* dc, const std::wstring& parseName, bool large)
+{
+    if (owner_ != dc) { map_.clear(); owner_ = dc; }
+    std::wstring key = (large ? L"NL|" : L"NS|") + parseName;
+    auto it = map_.find(key);
+    if (it != map_.end()) return it->second.Get();
+
+    ComPtr<ID2D1Bitmap> bmp;
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(parseName.c_str(), nullptr, &pidl, 0, nullptr)) && pidl)
+    {
+        SHFILEINFOW sfi{};
+        if (SHGetFileInfoW(reinterpret_cast<LPCWSTR>(pidl), 0, &sfi, sizeof(sfi),
+                SHGFI_PIDL | SHGFI_ICON | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON)) && sfi.hIcon)
+        {
+            bmp = FromHIcon(dc, sfi.hIcon);
+            DestroyIcon(sfi.hIcon);
+        }
+        CoTaskMemFree(pidl);
     }
     ID2D1Bitmap* raw = bmp.Get();
     map_.emplace(std::move(key), std::move(bmp));

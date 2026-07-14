@@ -108,11 +108,30 @@ namespace
     int  g_hoverNav = -1;                         // hovered sidebar row
     int  g_hoverCard = -1;                        // hovered Home card
 
-    struct NavItem { std::wstring label, path; int kind; };   // kind 0 folder, 1 header, 2 drive, 3 home
-    std::vector<NavItem>     g_nav;
-    std::vector<D2D1_RECT_F> g_navRects;          // parallels g_nav, rebuilt per draw
-    std::vector<D2D1_RECT_F> g_homeCardRects;     // parallels the Home cards, rebuilt per draw
-    std::vector<int>         g_homeCardNav;       // g_nav index each Home card maps to
+    // Expandable navigation tree (sidebar). kind: 0 folder, 2 drive, 3 Home,
+    // 4 This PC, 5 separator. Children (drives / subdirectories) load lazily.
+    struct NavNode
+    {
+        std::wstring label, path;
+        int  kind = 0;
+        bool expandable = false, expanded = false, loaded = false;
+        std::vector<NavNode> children;
+    };
+    struct NavRow { NavNode* node = nullptr; int depth = 0; };
+    std::vector<NavNode>     g_navRoots;
+    std::vector<NavRow>      g_navRows;            // flattened visible tree (rebuilt on toggle)
+    std::vector<D2D1_RECT_F> g_navRects, g_navChevRects;   // parallel g_navRows, rebuilt per draw
+    float g_navScroll = 0.f, g_navMaxScroll = 0.f;
+
+    std::vector<std::pair<std::wstring, std::wstring>> g_quickAccess;  // Home cards: (label, path)
+    std::vector<std::pair<std::wstring, std::wstring>> g_drives;       // (label, root)
+
+    std::vector<D2D1_RECT_F>  g_homeCardRects;    // parallels the Home cards, rebuilt per draw
+    std::vector<std::wstring> g_homeCardPaths;    // path each Home card navigates to
+
+    // Shell parsing names for the virtual-location icons (Home / This PC).
+    const wchar_t* kHomeParse   = L"shell:::{f874310e-b6b7-47dc-bc84-b9e6b38f5903}";
+    const wchar_t* kThisPCParse = L"shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
 
     // Command palette / search overlay (§6.6).
     struct PalItem { int cmd; std::wstring title, cat; int score; };
@@ -165,7 +184,8 @@ namespace
     std::wstring ParentOf(const std::wstring& p)
     {
         if (p.empty()) return L"";
-        if (p.size() == 3 && p[1] == L':' && p[2] == L'\\') return L"";
+        if (p == kThisPC) return L"";                                   // This PC → Home
+        if (p.size() == 3 && p[1] == L':' && p[2] == L'\\') return kThisPC;   // drive root → This PC
         std::wstring s = p;
         if (s.back() == L'\\') s.pop_back();
         const size_t bs = s.find_last_of(L'\\');
@@ -176,6 +196,7 @@ namespace
     std::wstring TabTitle(const std::wstring& p)
     {
         if (p.empty()) return L"Home";
+        if (p == kThisPC) return L"This PC";
         if (p.size() == 3 && p[1] == L':' && p[2] == L'\\') return p.substr(0, 2);
         std::wstring s = p;
         if (s.back() == L'\\') s.pop_back();
@@ -401,7 +422,7 @@ Chrome g_chrome;
 namespace
 {
     ComPtr<IDWriteTextFormat> g_tabFmt, g_glyphFmt, g_palTitleFmt, g_palInputFmt;
-    ComPtr<IDWriteTextFormat> g_navFmt, g_secFmt, g_fluentFmt, g_homeHeadFmt, g_detHeadFmt, g_detKeyFmt;
+    ComPtr<IDWriteTextFormat> g_navFmt, g_secFmt, g_fluentFmt, g_chevFmt, g_homeHeadFmt, g_detHeadFmt, g_detKeyFmt;
     ID2D1DeviceContext* g_brOwner = nullptr;
     ComPtr<ID2D1SolidColorBrush> g_brStrip, g_brTabActive, g_brTabHover, g_brText, g_brText2, g_brAccent, g_brLine,
         g_brDim, g_brPanel, g_brSelBg, g_brCtrl;
@@ -455,6 +476,7 @@ namespace
     D2D1_RECT_F SidebarRc() { return { 0, ContentTop(), kSidebarW, ContentBottom() }; }
     D2D1_RECT_F DetailsRc() { return { ViewW() - kDetailsW, ContentTop(), ViewW(), ContentBottom() }; }
     bool IsHome(const Tab& t) { return t.path.empty(); }
+    bool IsThisPC(const Tab& t) { return t.path == kThisPC; }
     Rc StripRc(int i) { Rc p = PaneRc(i); return { p.l, p.t, p.r, p.t + kTabStripH }; }
     Rc ListRc(int i) { Rc p = PaneRc(i); return { p.l, p.t + kTabStripH, p.r, p.b }; }
 
@@ -598,7 +620,8 @@ void UpdateTitleBar()
 {
     if (!g_hwnd) return;
     const std::wstring& path = AT().path;
-    std::wstring disp = path.empty() ? std::wstring(L"Home") : path;
+    std::wstring disp = path.empty() ? std::wstring(L"Home")
+                      : (path == kThisPC ? std::wstring(L"This PC") : path);
     SetWindowTextW(g_hwnd, (disp + L"  —  Crash").c_str());
 }
 
@@ -712,8 +735,10 @@ std::vector<ChromeSeg> BuildSegments(const std::wstring& path)
 {
     std::vector<ChromeSeg> segs;
     segs.push_back({ L"Home", L"" });
+    if (path == kThisPC) { segs.push_back({ L"This PC", kThisPC }); return segs; }
     if (!path.empty())
     {
+        segs.push_back({ L"This PC", kThisPC });
         std::wstring drive = path.substr(0, 2);
         std::wstring acc = drive + L"\\";
         segs.push_back({ drive, acc });
@@ -734,7 +759,7 @@ std::vector<ChromeSeg> BuildSegments(const std::wstring& path)
     return segs;
 }
 
-void BeginAddressEdit() { g_addr.Begin(AT().path); g_dirty = true; }
+void BeginAddressEdit() { std::wstring t = AT().path; if (t == kThisPC) t.clear(); g_addr.Begin(t); g_dirty = true; }
 void CommitAddress()
 {
     std::wstring t = g_addr.text;
@@ -1147,16 +1172,102 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id)
     return s;
 }
 
-// Build the navigation model: Home, pinned Quick access folders, then This PC
-// with its drives. Rebuilt at startup (drives rarely change during a session).
+// Enumerate the machine's drives as (label, root) — used by Home cards, the This
+// PC screen, and the This PC subtree. Rebuilt at startup (drives rarely change).
+void BuildDriveList()
+{
+    g_drives.clear();
+    wchar_t buf[512] = L"";
+    if (GetLogicalDriveStringsW(511, buf))
+        for (wchar_t* d = buf; *d; d += wcslen(d) + 1)
+        {
+            std::wstring root = d;                       // "C:\"
+            std::wstring letter = root.substr(0, 2);     // "C:"
+            const UINT dt = GetDriveTypeW(root.c_str());
+            wchar_t vol[MAX_PATH] = L"";
+            if (dt == DRIVE_FIXED)
+                GetVolumeInformationW(root.c_str(), vol, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0);
+            const wchar_t* kind = dt == DRIVE_REMOTE    ? L"Network Drive"
+                                : dt == DRIVE_REMOVABLE ? L"Removable Disk"
+                                : dt == DRIVE_CDROM     ? L"CD Drive"
+                                :                         L"Local Disk";
+            std::wstring disp = (vol[0] ? std::wstring(vol) : std::wstring(kind)) + L" (" + letter + L")";
+            g_drives.push_back({ disp, root });
+        }
+}
+
+// Flatten the tree into the visible-row list (children only under expanded nodes).
+void FlattenNavInto(std::vector<NavNode>& nodes, int depth)
+{
+    for (auto& n : nodes)
+    {
+        g_navRows.push_back({ &n, depth });
+        if (n.expanded && !n.children.empty()) FlattenNavInto(n.children, depth + 1);
+    }
+}
+void FlattenNav() { g_navRows.clear(); FlattenNavInto(g_navRoots, 0); }
+
+// Lazily populate a node's children: This PC → drives; a drive/folder → its
+// immediate subdirectories. Synchronous (one level, on demand) — fast for local
+// drives; a disconnected network drive could briefly stall on expand.
+void LoadNavChildren(NavNode& n)
+{
+    if (n.loaded) return;
+    n.loaded = true;
+    n.children.clear();
+
+    if (n.kind == 4)   // This PC → drives
+    {
+        for (auto& d : g_drives) { NavNode c; c.label = d.first; c.path = d.second; c.kind = 2; c.expandable = true; n.children.push_back(c); }
+    }
+    else               // drive/folder → subdirectories only
+    {
+        std::wstring base = n.path;
+        if (base.empty()) { if (n.children.empty()) n.expandable = false; return; }
+        if (base.back() != L'\\') base += L'\\';
+        const bool showHidden = g_settings.showHidden;
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileExW((base + L"*").c_str(), FindExInfoBasic, &fd,
+                                    FindExSearchLimitToDirectories, nullptr, 0);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))) continue;
+                if (!showHidden && (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) continue;
+                NavNode c; c.label = fd.cFileName; c.path = base + fd.cFileName; c.kind = 0; c.expandable = true;
+                n.children.push_back(std::move(c));
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        std::sort(n.children.begin(), n.children.end(),
+                  [](const NavNode& a, const NavNode& b) { return _wcsicmp(a.label.c_str(), b.label.c_str()) < 0; });
+    }
+    if (n.children.empty()) n.expandable = false;   // nothing to expand → drop the chevron
+}
+
+void ToggleNav(NavNode& n)
+{
+    if (!n.expandable) return;
+    if (!n.expanded) { LoadNavChildren(n); n.expanded = !n.children.empty(); }
+    else             { n.expanded = false; }
+    FlattenNav();
+    g_dirty = true;
+}
+
+// Build the navigation tree: Home, pinned Quick access folders, a separator, then
+// an expandable This PC (drives → folders → subfolders load lazily).
 void BuildNav()
 {
-    g_nav.clear();
-    g_nav.push_back({ L"Home", L"", 3 });
+    BuildDriveList();
+    g_quickAccess.clear();
+    g_navRoots.clear();
+
+    g_navRoots.push_back({ L"Home", L"", 3 });
 
     auto add = [&](const wchar_t* label, REFKNOWNFOLDERID id) {
         std::wstring p = KnownFolder(id);
-        if (!p.empty()) g_nav.push_back({ label, p, 0 });
+        if (!p.empty()) { NavNode n; n.label = label; n.path = p; n.kind = 0; g_navRoots.push_back(n); g_quickAccess.push_back({ label, p }); }
     };
     add(L"Desktop",   FOLDERID_Desktop);
     add(L"Downloads", FOLDERID_Downloads);
@@ -1165,20 +1276,11 @@ void BuildNav()
     add(L"Music",     FOLDERID_Music);
     add(L"Videos",    FOLDERID_Videos);
 
-    g_nav.push_back({ L"This PC", L"", 1 });   // section header
+    { NavNode sep; sep.kind = 5; g_navRoots.push_back(sep); }            // separator below Videos
 
-    wchar_t buf[512] = L"";
-    if (GetLogicalDriveStringsW(511, buf))
-        for (wchar_t* d = buf; *d; d += wcslen(d) + 1)
-        {
-            std::wstring root = d;                       // "C:\"
-            std::wstring letter = root.substr(0, 2);     // "C:"
-            wchar_t vol[MAX_PATH] = L"";
-            if (GetDriveTypeW(root.c_str()) == DRIVE_FIXED)
-                GetVolumeInformationW(root.c_str(), vol, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0);
-            std::wstring disp = (vol[0] ? std::wstring(vol) : std::wstring(L"Local Disk")) + L" (" + letter + L")";
-            g_nav.push_back({ disp, root, 2 });
-        }
+    { NavNode pc; pc.label = L"This PC"; pc.path = kThisPC; pc.kind = 4; pc.expandable = true; g_navRoots.push_back(pc); }
+
+    FlattenNav();
 }
 
 void DrawSidebar(ID2D1DeviceContext* dc)
@@ -1189,37 +1291,57 @@ void DrawSidebar(ID2D1DeviceContext* dc)
     dc->PushAxisAlignedClip(sb, D2D1_ANTIALIAS_MODE_ALIASED);
 
     const std::wstring& cur = AT().path;
-    g_navRects.assign(g_nav.size(), D2D1_RECT_F{ 0, 0, 0, 0 });
-    const float rowH = 32.f;
-    float y = sb.top + 8.f;
-    for (size_t i = 0; i < g_nav.size(); ++i)
+    g_navRects.assign(g_navRows.size(), D2D1_RECT_F{ 0, 0, 0, 0 });
+    g_navChevRects.assign(g_navRows.size(), D2D1_RECT_F{ 0, 0, 0, 0 });
+    const float rowH = 30.f, indent = 15.f, baseX = sb.left + 12.f;
+    float y = sb.top + 8.f - g_navScroll;
+
+    for (size_t i = 0; i < g_navRows.size(); ++i)
     {
-        const NavItem& it = g_nav[i];
-        if (it.kind == 1)   // section header
+        NavNode* n = g_navRows[i].node;
+        const int depth = g_navRows[i].depth;
+        if (n->kind == 5)   // separator
         {
-            y += 10.f;
-            dc->DrawText(it.label.c_str(), (UINT32)it.label.size(), g_secFmt.Get(),
-                { sb.left + 18.f, y, sb.right - 8.f, y + 20.f }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            y += 24.f;
+            const float ly = std::floor(y + 8.f) + 0.5f;
+            dc->DrawLine({ sb.left + 16.f, ly }, { sb.right - 14.f, ly }, g_brLine.Get(), 1.f);
+            y += 17.f;
             continue;
         }
-        const D2D1_RECT_F r{ sb.left + 6.f, y, sb.right - 6.f, y + rowH };
+        const D2D1_RECT_F r{ sb.left + 4.f, y, sb.right - 6.f, y + rowH };
         g_navRects[i] = r;
-        const bool active = (it.path == cur);
-        if (active)                       dc->FillRoundedRectangle({ r, 5, 5 }, g_brSelBg.Get());
-        else if ((int)i == g_hoverNav)    dc->FillRoundedRectangle({ r, 5, 5 }, g_brTabHover.Get());
-        if (active) dc->FillRoundedRectangle({ { r.left + 1.f, r.top + 8.f, r.left + 4.f, r.bottom - 8.f }, 1.5f, 1.5f }, g_brAccent.Get());
 
-        const float ix = sb.left + 18.f, iy = y + (rowH - 16.f) * 0.5f;
-        if (it.kind == 3)   // Home glyph (Segoe Fluent Icons)
-            dc->DrawText(L"\xE80F", 1, g_fluentFmt.Get(), { ix - 2, y, ix + 18, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        else if (ID2D1Bitmap* bmp = g_icons->GetForPath(dc, it.path, false))
-            dc->DrawBitmap(bmp, { ix, iy, ix + 16, iy + 16 });
+        if (y + rowH >= sb.top && y <= sb.bottom)   // cull rows scrolled out of view
+        {
+            const bool active = (n->path == cur);
+            if (active)                    dc->FillRoundedRectangle({ r, 5, 5 }, g_brSelBg.Get());
+            else if ((int)i == g_hoverNav) dc->FillRoundedRectangle({ r, 5, 5 }, g_brTabHover.Get());
+            if (active) dc->FillRoundedRectangle({ { r.left + 1.f, r.top + 7.f, r.left + 4.f, r.bottom - 7.f }, 1.5f, 1.5f }, g_brAccent.Get());
 
-        dc->DrawText(it.label.c_str(), (UINT32)it.label.size(), g_navFmt.Get(),
-            { sb.left + 44.f, y, sb.right - 12.f, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            const float rowX = baseX + depth * indent;
+            if (n->expandable)   // chevron (collapsed ▶ / expanded ▾)
+            {
+                const D2D1_RECT_F ch{ rowX - 3.f, y, rowX + 14.f, y + rowH };
+                g_navChevRects[i] = ch;
+                dc->DrawText(n->expanded ? L"\xE70D" : L"\xE76C", 1, g_chevFmt.Get(), ch,
+                    ((int)i == g_hoverNav || active) ? g_brText.Get() : g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+
+            const float ix = rowX + 16.f, iy = y + (rowH - 16.f) * 0.5f;
+            ID2D1Bitmap* bmp = (n->kind == 3) ? g_icons->GetForParseName(dc, kHomeParse, false)
+                             : (n->kind == 4) ? g_icons->GetForParseName(dc, kThisPCParse, false)
+                             :                  g_icons->GetForPath(dc, n->path, false);
+            if (bmp) dc->DrawBitmap(bmp, { ix, iy, ix + 16, iy + 16 });
+            else if (n->kind == 3) dc->DrawText(L"\xE80F", 1, g_fluentFmt.Get(), { ix - 2, y, ix + 18, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+            dc->DrawText(n->label.c_str(), (UINT32)n->label.size(), g_navFmt.Get(),
+                { ix + 22.f, y, sb.right - 12.f, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
         y += rowH;
     }
+
+    const float totalH = (y + g_navScroll) - (sb.top + 8.f) + 10.f;
+    g_navMaxScroll = (std::max)(0.f, totalH - (sb.bottom - sb.top));
+    if (g_navScroll > g_navMaxScroll) g_navScroll = g_navMaxScroll;
     dc->PopAxisAlignedClip();
 }
 
@@ -1314,25 +1436,24 @@ void DrawHome(ID2D1DeviceContext* dc, const Rc& area)
             { x0, y, area.r - pad, y + 30.f }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         y += 42.f;
     };
-    auto cardsFor = [&](int kind) {
+    auto cards = [&](const std::vector<std::pair<std::wstring, std::wstring>>& items) {
         const float cardH = 60.f, gap = 12.f, cardMin = 200.f;
         const int cols = (std::max)(1, (int)((innerW + gap) / (cardMin + gap)));
         const float cw = (innerW - gap * (cols - 1)) / cols;
         int col = 0; float rowY = y;
-        for (size_t i = 0; i < g_nav.size(); ++i)
+        for (const auto& it : items)
         {
-            if (g_nav[i].kind != kind) continue;
             const float cxp = x0 + col * (cw + gap);
             const D2D1_RECT_F r{ cxp, rowY, cxp + cw, rowY + cardH };
             const bool hov = ((int)g_homeCardRects.size() == g_hoverCard);
             dc->FillRoundedRectangle({ r, 8, 8 }, hov ? g_brTabHover.Get() : g_brCtrl.Get());
             dc->DrawRoundedRectangle({ r, 8, 8 }, g_brLine.Get(), 1.f);
             const float iy = rowY + (cardH - 32.f) * 0.5f;
-            if (ID2D1Bitmap* bmp = g_icons->GetForPath(dc, g_nav[i].path, true))
+            if (ID2D1Bitmap* bmp = g_icons->GetForPath(dc, it.second, true))
                 dc->DrawBitmap(bmp, { cxp + 14.f, iy, cxp + 46.f, iy + 32.f });
-            dc->DrawText(g_nav[i].label.c_str(), (UINT32)g_nav[i].label.size(), g_navFmt.Get(),
+            dc->DrawText(it.first.c_str(), (UINT32)it.first.size(), g_navFmt.Get(),
                 { cxp + 58.f, rowY, r.right - 10.f, rowY + cardH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            g_homeCardRects.push_back(r); g_homeCardNav.push_back((int)i);
+            g_homeCardRects.push_back(r); g_homeCardPaths.push_back(it.second);
             if (++col >= cols) { col = 0; rowY += cardH + gap; }
         }
         if (col != 0) rowY += cardH + gap;
@@ -1340,10 +1461,10 @@ void DrawHome(ID2D1DeviceContext* dc, const Rc& area)
     };
 
     section(L"Quick access");
-    cardsFor(0);
+    cards(g_quickAccess);
     y += 6.f;
     section(L"Devices and drives");
-    cardsFor(2);
+    cards(g_drives);
 }
 
 void RenderFrame(bool caretOn, bool animating)
@@ -1354,7 +1475,7 @@ void RenderFrame(bool caretOn, bool animating)
     dc->Clear(g_theme.windowBg);
 
     g_thumbs->BeginFrame();        // collect visible thumbnail keys across all panes
-    g_homeCardRects.clear(); g_homeCardNav.clear();
+    g_homeCardRects.clear(); g_homeCardPaths.clear();
     for (int i = 0; i < VisiblePanes(); ++i)
     {
         Pane& p = g_pane[i];
@@ -1506,6 +1627,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(hwnd, &pt);
+        // Scroll the navigation sidebar when the cursor is over it.
+        if (g_sidebar && dipX(pt.x) < kSidebarW && dipY(pt.y) >= ContentTop() && dipY(pt.y) < ContentBottom())
+        {
+            g_navScroll = std::clamp(g_navScroll - GET_WHEEL_DELTA_WPARAM(wParam) / 120.f * 48.f, 0.f, g_navMaxScroll);
+            g_dirty = true;
+            return 0;
+        }
         int pane = PaneAt(dipX(pt.x), dipY(pt.y));
         if (pane < 0) pane = g_activePane;
         if (!g_pane[pane].tabs.empty() && g_pane[pane].tabs[g_pane[pane].active]->view->OnWheel(GET_WHEEL_DELTA_WPARAM(wParam))) g_dirty = true;
@@ -1566,8 +1694,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Sidebar + Home-card hover.
         int newNav = -1;
         if (g_sidebar && dx < kSidebarW && dy >= ContentTop() && dy < ContentBottom())
-            for (size_t i = 0; i < g_navRects.size(); ++i)
-            { const auto& r = g_navRects[i]; if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom) { newNav = (int)i; break; } }
+        {
+            const size_t nrows = (std::min)(g_navRows.size(), g_navRects.size());
+            for (size_t i = 0; i < nrows; ++i)
+            {
+                if (g_navRows[i].node->kind == 5) continue;
+                const auto& r = g_navRects[i];
+                if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom) { newNav = (int)i; break; }
+            }
+        }
         if (newNav != g_hoverNav) { g_hoverNav = newNav; g_dirty = true; }
         int newCard = -1;
         if (dy >= ContentTop())
@@ -1647,14 +1782,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
-        // Left navigation sidebar.
+        // Left navigation sidebar: chevron toggles expand; row navigates.
         if (g_sidebar && dx < kSidebarW && dy >= ContentTop() && dy < ContentBottom())
         {
-            for (size_t i = 0; i < g_navRects.size(); ++i)
+            // Hit rects are (re)sized during the sidebar draw; a click that races a
+            // row-count change must not index past whichever is shorter.
+            const size_t nrows = (std::min)(g_navRows.size(), g_navRects.size());
+            for (size_t i = 0; i < nrows; ++i)
             {
+                NavNode* n = g_navRows[i].node;
+                const auto& cr = g_navChevRects[i];
+                if (cr.right > cr.left && dx >= cr.left && dx <= cr.right && dy >= cr.top && dy <= cr.bottom)
+                { ToggleNav(*n); return 0; }
                 const auto& r = g_navRects[i];
-                if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom)
-                { g_addr.Cancel(); NavigateTab(g_activePane, &AT(), g_nav[i].path); break; }
+                if (n->kind != 5 && dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom)
+                { g_addr.Cancel(); NavigateTab(g_activePane, &AT(), n->path); return 0; }
             }
             return 0;
         }
@@ -1691,7 +1833,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 {
                     const auto& r = g_homeCardRects[i];
                     if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom)
-                    { NavigateTab(pane, &AT(), g_nav[g_homeCardNav[i]].path); break; }
+                    { NavigateTab(pane, &AT(), g_homeCardPaths[i]); break; }
                 }
                 return 0;
             }
@@ -1984,6 +2126,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         mkfmt(L"Segoe UI Variable Text", 11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true,  true,  g_secFmt);
         mkfmt(L"Segoe Fluent Icons",     15.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_fluentFmt);
         g_fluentFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        mkfmt(L"Segoe Fluent Icons",     8.f,   DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_chevFmt);
+        g_chevFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         mkfmt(L"Segoe UI Variable Display", 18.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, true, g_homeHeadFmt);
         mkfmt(L"Segoe UI Variable Text", 16.f,  DWRITE_FONT_WEIGHT_SEMI_BOLD, false, false, g_detHeadFmt);
         mkfmt(L"Segoe UI Variable Text", 12.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_detKeyFmt);

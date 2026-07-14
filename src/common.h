@@ -46,3 +46,7 @@ inline D2D1_COLOR_F RGBf(int r, int g, int b, float a = 1.0f)
 // A DIP is 1/96". Convert between physical pixels and DIPs given a DPI.
 inline float PxToDip(float px, float dpi) { return px * 96.0f / dpi; }
 inline float DipToPx(float dip, float dpi) { return dip * dpi / 96.0f; }
+
+// Sentinel "path" for the This PC screen (drive list), distinct from "" (Home)
+// and from any real filesystem path (the leading \x01 can't occur in one).
+inline constexpr wchar_t kThisPC[] = L"\x01ThisPC";

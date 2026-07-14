@@ -162,7 +162,7 @@ void Enumerator::WorkerLoop()
             std::wstring qLower; for (wchar_t c : query) qLower += static_cast<wchar_t>(towlower(c));
             SearchTree(gen, path, qLower);
         }
-        else if (path.empty()) EnumerateDrives(gen);
+        else if (path.empty() || path == kThisPC) EnumerateDrives(gen);
         else                   EnumerateDirectory(gen, path);
     }
 }
