@@ -639,8 +639,12 @@ void SetViewports()
         Pane& p = g_pane[i];
         if (p.tabs.empty()) continue;
         Rc lr = ListRc(i);
-        UINT w = static_cast<UINT>(DipToPx(lr.r - lr.l, dpi));
-        UINT h = static_cast<UINT>(DipToPx(lr.b - lr.t, dpi));
+        // Clamp to >= 0 so a window narrower than sidebar+details can't produce a
+        // negative width that casts to a ~4-billion UINT viewport.
+        const float wDip = (std::max)(0.f, lr.r - lr.l);
+        const float hDip = (std::max)(0.f, lr.b - lr.t);
+        UINT w = static_cast<UINT>(DipToPx(wDip, dpi));
+        UINT h = static_cast<UINT>(DipToPx(hDip, dpi));
         p.tabs[p.active]->view->SetViewport(w, h, dpi);
     }
 }
@@ -1753,6 +1757,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_NCMOUSELEAVE:
         if (g_capHover) { g_capHover = 0; g_dirty = true; }
         break;
+
+    case WM_GETMINMAXINFO:
+    {
+        UINT dpi = GetDpiForWindow(hwnd); if (!dpi) dpi = 96;
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        mmi->ptMinTrackSize.x = MulDiv(640, dpi, 96);   // keep sidebar+content+details viable
+        mmi->ptMinTrackSize.y = MulDiv(400, dpi, 96);
+        return 0;
+    }
 
     case WM_SIZE:
         g_maxed = (wParam == SIZE_MAXIMIZED) ? 1 : (wParam == SIZE_RESTORED ? 0 : g_maxed);
