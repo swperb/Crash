@@ -183,6 +183,8 @@ namespace
     bool g_hoverNewTab = false;
     int  g_capHover = 0;      // 0 none, 1 min, 2 max, 3 close
     int  g_maxed = 0;         // window maximized (cached for NC math)
+    float g_tabScroll = 0.f;  // horizontal scroll of the tab strip (DIP)
+    int  g_hoverTabChev = 0;  // 0 none, 1 left, 2 right (tab-strip scroll chevrons)
 
     std::vector<float> g_pacingMs; size_t g_pacingIdx = 0;
     constexpr size_t kSamples = 180;
@@ -508,17 +510,66 @@ namespace
     }
 
     // Window-level tabs (the active pane's) fill the title bar left of the caption.
-    void TopTabLayout(std::vector<D2D1_RECT_F>& rects, D2D1_RECT_F& newBtn)
+    // When they overflow, tabs hold a minimum width and the strip scrolls, with
+    // left/right chevrons and a pinned + button.
+    constexpr float kMinTabW = 130.f, kMaxTabW = 240.f;
+    struct TabBar
     {
+        std::vector<D2D1_RECT_F> tabs;   // absolute, post-scroll (may fall outside viewport)
+        D2D1_RECT_F newBtn{}, leftChev{}, rightChev{}, viewport{};
+        bool  overflow = false;
+        float tabW = 0.f, contentW = 0.f, maxScroll = 0.f, gap = 2.f;
+    };
+    TabBar LayoutTabBar()
+    {
+        TabBar tb;
         Pane& p = AP();
-        const float top = 5.f, bot = Chrome::kTitleH, x0 = 8.f, newW = 34.f, gap = 2.f;
-        const float rightLimit = ViewW() - kCaptionW - 8.f;
-        float x = x0;
-        const int n = std::max<int>(1, (int)p.tabs.size());
-        const float avail = rightLimit - newW - gap - x;
-        const float tabW = std::clamp(avail / n - gap, 88.f, 240.f);
-        for (size_t t = 0; t < p.tabs.size(); ++t) { rects.push_back({ x, top, x + tabW, bot }); x += tabW + gap; }
-        newBtn = { x + 2.f, top + 3.f, x + 2.f + newW, bot - 4.f };
+        const float T = Chrome::kTitleH, top = 5.f, x0 = 8.f, newW = 34.f, chevW = 22.f;
+        const float regionRight = ViewW() - kCaptionW - 8.f;
+        const int n = (std::max)(1, (int)p.tabs.size());
+
+        const float availNoScroll = regionRight - x0 - newW - tb.gap;   // tabs + trailing +
+        float tabW = std::clamp(availNoScroll / n - tb.gap, kMinTabW, kMaxTabW);
+        float contentW = n * (tabW + tb.gap);
+
+        if (contentW <= availNoScroll + 0.5f)   // everything fits: no scroll
+        {
+            tb.tabW = tabW;
+            tb.viewport = { x0, top, regionRight - newW - tb.gap, T };
+            float x = x0;
+            for (size_t t = 0; t < p.tabs.size(); ++t) { tb.tabs.push_back({ x, top, x + tabW, T }); x += tabW + tb.gap; }
+            tb.newBtn = { x + 2.f, top + 3.f, x + 2.f + newW, T - 4.f };
+            g_tabScroll = 0.f;
+            return tb;
+        }
+
+        tb.overflow = true;
+        tabW = kMinTabW; tb.tabW = tabW;
+        contentW = n * (tabW + tb.gap); tb.contentW = contentW;
+        tb.newBtn    = { regionRight - newW, top + 3.f, regionRight, T - 4.f };
+        tb.leftChev  = { x0, top, x0 + chevW, T };
+        tb.rightChev = { regionRight - newW - tb.gap - chevW, top, regionRight - newW - tb.gap, T };
+        const float vpL = tb.leftChev.right + 2.f, vpR = tb.rightChev.left - 2.f;
+        tb.viewport = { vpL, top, vpR, T };
+        tb.maxScroll = (std::max)(0.f, contentW - (vpR - vpL));
+        g_tabScroll = std::clamp(g_tabScroll, 0.f, tb.maxScroll);
+        float x = vpL - g_tabScroll;
+        for (size_t t = 0; t < p.tabs.size(); ++t) { tb.tabs.push_back({ x, top, x + tabW, T }); x += tabW + tb.gap; }
+        return tb;
+    }
+
+    // Scroll the active tab into view (call after the active tab/pane changes).
+    void EnsureActiveTabVisible()
+    {
+        TabBar tb = LayoutTabBar();
+        if (!tb.overflow) { g_tabScroll = 0.f; return; }
+        const float a = (float)AP().active;
+        const float l = a * (tb.tabW + tb.gap), r = l + tb.tabW;
+        const float vpW = tb.viewport.right - tb.viewport.left;
+        if (l < g_tabScroll) g_tabScroll = l;
+        else if (r > g_tabScroll + vpW) g_tabScroll = r - vpW;
+        g_tabScroll = std::clamp(g_tabScroll, 0.f, tb.maxScroll);
+        g_dirty = true;
     }
 
     int PaneAt(float dx, float dy)
@@ -563,7 +614,7 @@ Tab* NewTab(int paneIdx, const std::wstring& path, bool activate)
     Tab* raw = t.get();
     raw->view->SetOnActivate([paneIdx, raw](size_t idx) { ActivateItem(paneIdx, raw, idx); });
     p.tabs.push_back(std::move(t));
-    if (activate) { p.active = p.tabs.size() - 1; SetViewports(); StartLoad(paneIdx, raw); }
+    if (activate) { p.active = p.tabs.size() - 1; SetViewports(); StartLoad(paneIdx, raw); EnsureActiveTabVisible(); }
     return raw;
 }
 
@@ -590,6 +641,7 @@ void SwitchTab(int paneIdx, size_t idx)
     SetViewports();
     if (!t->loaded && !t->loading) StartLoad(paneIdx, t);
     UpdateTitleBar();
+    EnsureActiveTabVisible();
     g_dirty = true;
 }
 
@@ -599,7 +651,7 @@ void CloseTab(int paneIdx, size_t idx)
     if (p.tabs.size() <= 1 || idx >= p.tabs.size()) return;   // keep >=1 tab
     p.tabs.erase(p.tabs.begin() + idx);
     if (p.active >= p.tabs.size()) p.active = p.tabs.size() - 1;
-    SetViewports(); UpdateTitleBar(); g_dirty = true;
+    SetViewports(); UpdateTitleBar(); EnsureActiveTabVisible(); g_dirty = true;
 }
 
 void CycleTab(int dir)
@@ -615,7 +667,7 @@ void ActivatePane(int i)
     if (!g_dual) i = 0;
     if (i == g_activePane) return;
     g_activePane = i;
-    UpdateTitleBar(); g_dirty = true;
+    UpdateTitleBar(); EnsureActiveTabVisible(); g_dirty = true;
 }
 
 void ToggleDual()
@@ -985,14 +1037,14 @@ void DrawTopBar(ID2D1DeviceContext* dc)
     dc->FillRectangle({ 0, 0, W, T }, g_brTitleBar.Get());
 
     Pane& p = AP();
-    std::vector<D2D1_RECT_F> rects; D2D1_RECT_F newBtn; TopTabLayout(rects, newBtn);
-    for (size_t t = 0; t < rects.size(); ++t)
+    const TabBar tb = LayoutTabBar();
+    dc->PushAxisAlignedClip(tb.viewport, D2D1_ANTIALIAS_MODE_ALIASED);   // tabs scroll within the viewport
+    for (size_t t = 0; t < tb.tabs.size(); ++t)
     {
-        const D2D1_RECT_F& r = rects[t];
+        const D2D1_RECT_F& r = tb.tabs[t];
+        if (r.right < tb.viewport.left || r.left > tb.viewport.right) continue;   // fully scrolled out
         const bool act = (t == p.active);
         const bool hov = (g_hoverTab.tab == (int)t);
-        // Active tab is a rounded card in the toolbar colour so it reads as connected
-        // to the toolbar below; hovered inactive tabs get a subtle fill.
         if (act)      dc->FillRoundedRectangle({ { r.left, r.top, r.right, T + 6.f }, 8, 8 }, g_brStrip.Get());
         else if (hov) dc->FillRoundedRectangle({ { r.left, r.top + 2.f, r.right, T - 3.f }, 7, 7 }, g_brTabHover.Get());
 
@@ -1009,8 +1061,17 @@ void DrawTopBar(ID2D1DeviceContext* dc)
         if ((act || hov) && p.tabs.size() > 1)
             dc->DrawText(L"\x2715", 1, g_glyphFmt.Get(), { r.right - 24.f, r.top, r.right - 6.f, T }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
-    if (g_hoverNewTab) dc->FillRoundedRectangle({ newBtn, 6, 6 }, g_brTabHover.Get());
-    dc->DrawText(L"+", 1, g_glyphFmt.Get(), newBtn, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    dc->PopAxisAlignedClip();
+
+    if (tb.overflow)   // scroll chevrons at the strip ends
+    {
+        if (g_hoverTabChev == 1) dc->FillRoundedRectangle({ tb.leftChev, 5, 5 }, g_brTabHover.Get());
+        if (g_hoverTabChev == 2) dc->FillRoundedRectangle({ tb.rightChev, 5, 5 }, g_brTabHover.Get());
+        dc->DrawText(L"\xE76B", 1, g_chevFmt.Get(), tb.leftChev,  g_tabScroll <= 0.5f ? g_brText2.Get() : g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        dc->DrawText(L"\xE76C", 1, g_chevFmt.Get(), tb.rightChev, g_tabScroll >= tb.maxScroll - 0.5f ? g_brText2.Get() : g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+    if (g_hoverNewTab) dc->FillRoundedRectangle({ tb.newBtn, 6, 6 }, g_brTabHover.Get());
+    dc->DrawText(L"+", 1, g_glyphFmt.Get(), tb.newBtn, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
     DrawCaption(dc);
 }
@@ -1731,9 +1792,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (cb == 1) return HTMINBUTTON;
             if (cb == 2) return HTMAXBUTTON;
             if (cb == 3) return HTCLOSE;
-            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
-            for (auto& rr : rects) if (dx >= rr.left && dx <= rr.right && dy >= rr.top) return HTCLIENT;
-            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) return HTCLIENT;
+            const TabBar tb = LayoutTabBar();
+            auto in = [&](const D2D1_RECT_F& r) { return dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom; };
+            if (in(tb.newBtn)) return HTCLIENT;
+            if (tb.overflow && (in(tb.leftChev) || in(tb.rightChev))) return HTCLIENT;
+            if (dx >= tb.viewport.left && dx <= tb.viewport.right)
+                for (auto& rr : tb.tabs) if (dx >= rr.left && dx <= rr.right && dy >= rr.top) return HTCLIENT;
             return HTCAPTION;   // draggable
         }
         return HTCLIENT;
@@ -1792,6 +1856,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(hwnd, &pt);
+        // Scroll the tab strip when the cursor is over the title bar and it overflows.
+        if (dipY(pt.y) < Chrome::kTitleH)
+        {
+            const TabBar tb = LayoutTabBar();
+            if (tb.overflow) { g_tabScroll = std::clamp(g_tabScroll - GET_WHEEL_DELTA_WPARAM(wParam) / 120.f * 60.f, 0.f, tb.maxScroll); g_dirty = true; }
+            return 0;
+        }
         // Scroll the navigation sidebar when the cursor is over it.
         if (g_sidebar && dipX(pt.x) < kSidebarW && dipY(pt.y) >= ContentTop() && dipY(pt.y) < ContentBottom())
         {
@@ -1838,17 +1909,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             BeginDrag(g_dragPane);   // modal OLE drag; returns after drop
             return 0;
         }
-        int newBtn = 0, ht = -1; bool newTabHov = false;
+        int newBtn = 0, ht = -1, newChev = 0; bool newTabHov = false;
         if (dy >= Chrome::kTitleH && dy < ContentTop()) newBtn = g_chrome.HitButton(dx, dy);
         else if (dy < Chrome::kTitleH)   // title-bar tabs (only the HTCLIENT tab/+ areas reach here)
         {
-            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
-            for (size_t t = 0; t < rects.size(); ++t) if (dx >= rects[t].left && dx <= rects[t].right && dy >= rects[t].top) { ht = (int)t; break; }
-            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) newTabHov = true;
+            const TabBar tb = LayoutTabBar();
+            if (dx >= tb.viewport.left && dx <= tb.viewport.right)
+                for (size_t t = 0; t < tb.tabs.size(); ++t) if (dx >= tb.tabs[t].left && dx <= tb.tabs[t].right && dy >= tb.tabs[t].top) { ht = (int)t; break; }
+            if (dx >= tb.newBtn.left && dx <= tb.newBtn.right && dy >= tb.newBtn.top && dy <= tb.newBtn.bottom) newTabHov = true;
+            if (tb.overflow)
+            {
+                if (dx >= tb.leftChev.left && dx <= tb.leftChev.right) newChev = 1;
+                else if (dx >= tb.rightChev.left && dx <= tb.rightChev.right) newChev = 2;
+            }
         }
         if (newBtn != g_hoverButton) { g_hoverButton = newBtn; g_dirty = true; }
         if (ht != g_hoverTab.tab) { g_hoverTab.tab = ht; g_hoverTab.pane = g_activePane; g_dirty = true; }
         if (newTabHov != g_hoverNewTab) { g_hoverNewTab = newTabHov; g_dirty = true; }
+        if (newChev != g_hoverTabChev) { g_hoverTabChev = newChev; g_dirty = true; }
 
         // Sidebar + Home-card hover.
         int newNav = -1;
@@ -1879,7 +1957,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_MOUSELEAVE:
-        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 }; g_hoverNav = -1; g_hoverCard = -1; g_hoverNewTab = false;
+        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 }; g_hoverNav = -1; g_hoverCard = -1; g_hoverNewTab = false; g_hoverTabChev = 0;
         for (int i = 0; i < VisiblePanes(); ++i) if (!g_pane[i].tabs.empty()) g_pane[i].tabs[g_pane[i].active]->view->OnMouseLeave();
         g_dirty = true;
         return 0;
@@ -1926,16 +2004,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Title-bar tabs (caption buttons are non-client; empty title area is drag).
         if (dy < Chrome::kTitleH)
         {
-            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
-            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) { NewTab(g_activePane, AT().path, true); return 0; }
+            const TabBar tb = LayoutTabBar();
+            if (dx >= tb.newBtn.left && dx <= tb.newBtn.right && dy >= tb.newBtn.top && dy <= tb.newBtn.bottom) { NewTab(g_activePane, AT().path, true); return 0; }
+            if (tb.overflow)   // scroll chevrons: page by ~viewport width
+            {
+                const float step = (tb.viewport.right - tb.viewport.left) * 0.6f;
+                if (dx >= tb.leftChev.left && dx <= tb.leftChev.right)  { g_tabScroll = std::clamp(g_tabScroll - step, 0.f, tb.maxScroll); g_dirty = true; return 0; }
+                if (dx >= tb.rightChev.left && dx <= tb.rightChev.right) { g_tabScroll = std::clamp(g_tabScroll + step, 0.f, tb.maxScroll); g_dirty = true; return 0; }
+            }
             Pane& p = AP();
-            for (size_t t = 0; t < rects.size() && t < p.tabs.size(); ++t)
-                if (dx >= rects[t].left && dx <= rects[t].right)
-                {
-                    if (p.tabs.size() > 1 && dx >= rects[t].right - 26.f) CloseTab(g_activePane, t);
-                    else SwitchTab(g_activePane, t);
-                    return 0;
-                }
+            if (dx >= tb.viewport.left && dx <= tb.viewport.right)
+                for (size_t t = 0; t < tb.tabs.size() && t < p.tabs.size(); ++t)
+                    if (dx >= tb.tabs[t].left && dx <= tb.tabs[t].right)
+                    {
+                        if (p.tabs.size() > 1 && dx >= tb.tabs[t].right - 26.f) CloseTab(g_activePane, t);
+                        else SwitchTab(g_activePane, t);
+                        return 0;
+                    }
             return 0;
         }
         if (dy < ContentTop())
