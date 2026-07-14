@@ -177,7 +177,12 @@ namespace
         return ca != FALSE;
     }
 
-    constexpr float kTabStripH = 34.f;
+    // Window caption buttons (min / max / close) live in the merged title bar.
+    constexpr float kCapBtnW = 46.f;
+    constexpr float kCaptionW = kCapBtnW * 3.f;
+    bool g_hoverNewTab = false;
+    int  g_capHover = 0;      // 0 none, 1 min, 2 max, 3 close
+    int  g_maxed = 0;         // window maximized (cached for NC math)
 
     std::vector<float> g_pacingMs; size_t g_pacingIdx = 0;
     constexpr size_t kSamples = 180;
@@ -278,6 +283,7 @@ std::wstring g_renameOldPath;
 class Chrome
 {
 public:
+    static constexpr float kTitleH = 40.f;      // merged title bar (tabs + caption)
     static constexpr float kToolbarH = 48.f;
     static constexpr float kStatusH = 26.f;
     static constexpr float kAddrLeft = 160.f;   // after 4 toolbar buttons
@@ -301,9 +307,9 @@ public:
         statusR_ = mk(L"Segoe UI", 12.f, DWRITE_TEXT_ALIGNMENT_TRAILING, true);
     }
 
-    static D2D1_RECT_F Btn(int i) { float x = 8.f + i * 36.f; return { x, 8.f, x + 32.f, 40.f }; }
-    static D2D1_RECT_F GearRect(float viewW) { return { viewW - 44.f, 8.f, viewW - 12.f, 40.f }; }
-    static D2D1_RECT_F DetailsRect(float viewW) { return { viewW - 88.f, 8.f, viewW - 56.f, 40.f }; }
+    static D2D1_RECT_F Btn(int i) { float x = 8.f + i * 36.f; return { x, kTitleH + 8.f, x + 32.f, kTitleH + 40.f }; }
+    static D2D1_RECT_F GearRect(float viewW) { return { viewW - 44.f, kTitleH + 8.f, viewW - 12.f, kTitleH + 40.f }; }
+    static D2D1_RECT_F DetailsRect(float viewW) { return { viewW - 88.f, kTitleH + 8.f, viewW - 56.f, kTitleH + 40.f }; }
     int HitButton(float x, float y) const
     {
         for (int i = 0; i < 4; ++i) { auto r = Btn(i); if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i + 1; }
@@ -341,7 +347,7 @@ public:
             brDisabled_ = b(g_theme.controlDisabled); brLine_ = b(g_theme.gridLine); brSel_ = b(g_theme.rowSelected);
         }
 
-        dc->FillRectangle({ 0, 0, viewW, kToolbarH }, brToolbar_.Get());
+        dc->FillRectangle({ 0, kTitleH, viewW, kTitleH + kToolbarH }, brToolbar_.Get());
         const wchar_t* glyphs[3] = { L"\x2190", L"\x2192", L"\x2191" };
         const bool en[4] = { s.backEnabled, s.fwdEnabled, s.upEnabled, true };
         for (int i = 0; i < 4; ++i)
@@ -378,7 +384,7 @@ public:
         }
 
         // Address: breadcrumb or inline editor (leaves room for details + gear).
-        D2D1_RECT_F addr{ kAddrLeft, 8.f, viewW - 96.f, 40.f };
+        D2D1_RECT_F addr{ kAddrLeft, kTitleH + 8.f, viewW - 96.f, kTitleH + 40.f };
         lastAddr_ = addr;
         dc->FillRoundedRectangle({ addr, 4, 4 }, brCtrl_.Get());
         dc->PushAxisAlignedClip({ addr.left + 2, addr.top, addr.right - 2, addr.bottom }, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -431,10 +437,10 @@ Chrome g_chrome;
 namespace
 {
     ComPtr<IDWriteTextFormat> g_tabFmt, g_glyphFmt, g_palTitleFmt, g_palInputFmt;
-    ComPtr<IDWriteTextFormat> g_navFmt, g_secFmt, g_fluentFmt, g_chevFmt, g_homeHeadFmt, g_detHeadFmt, g_detKeyFmt;
+    ComPtr<IDWriteTextFormat> g_navFmt, g_secFmt, g_fluentFmt, g_chevFmt, g_capFmt, g_homeHeadFmt, g_detHeadFmt, g_detKeyFmt;
     ID2D1DeviceContext* g_brOwner = nullptr;
     ComPtr<ID2D1SolidColorBrush> g_brStrip, g_brTabActive, g_brTabHover, g_brText, g_brText2, g_brAccent, g_brLine,
-        g_brDim, g_brPanel, g_brSelBg, g_brCtrl;
+        g_brDim, g_brPanel, g_brSelBg, g_brCtrl, g_brTitleBar, g_brClose;
 
     void EnsureMainBrushes(ID2D1DeviceContext* dc)
     {
@@ -447,6 +453,8 @@ namespace
         g_brPanel = b(g_theme.dark ? RGBf(46, 46, 46) : RGBf(250, 250, 250));
         g_brSelBg = b(g_theme.rowSelected);
         g_brCtrl = b(g_theme.controlBg);
+        g_brTitleBar = b(g_theme.dark ? RGBf(22, 22, 22) : RGBf(228, 228, 228));   // darker than toolbar
+        g_brClose = b(RGBf(232, 17, 35));                                          // Win11 close-button red
     }
 }
 
@@ -457,7 +465,7 @@ namespace
     struct Rc { float l, t, r, b; };
     float ViewW() { return g_gfx.WidthDip(); }
     float ViewH() { return g_gfx.HeightDip(); }
-    float ContentTop() { return Chrome::kToolbarH; }
+    float ContentTop() { return Chrome::kTitleH + Chrome::kToolbarH; }
     float ContentBottom() { return ViewH() - Chrome::kStatusH; }
     // The panes live between the sidebar (left) and the details pane (right).
     float ContentLeft()  { return g_sidebar ? kSidebarW : 0.f; }
@@ -486,19 +494,29 @@ namespace
     D2D1_RECT_F DetailsRc() { return { ViewW() - kDetailsW, ContentTop(), ViewW(), ContentBottom() }; }
     bool IsHome(const Tab& t) { return t.path.empty(); }
     bool IsThisPC(const Tab& t) { return t.path == kThisPC; }
-    Rc StripRc(int i) { Rc p = PaneRc(i); return { p.l, p.t, p.r, p.t + kTabStripH }; }
-    Rc ListRc(int i) { Rc p = PaneRc(i); return { p.l, p.t + kTabStripH, p.r, p.b }; }
+    Rc ListRc(int i) { return PaneRc(i); }   // panes no longer carry their own tab strip
 
-    void TabLayout(int i, std::vector<D2D1_RECT_F>& rects, D2D1_RECT_F& newBtn)
+    // Window caption buttons live at the top-right of the title bar: 0 min, 1 max, 2 close.
+    D2D1_RECT_F CapBtnRect(int i) { const float x = ViewW() - (3 - i) * kCapBtnW; return { x, 0.f, x + kCapBtnW, Chrome::kTitleH }; }
+    int CapHit(float dx, float dy)
     {
-        Rc s = StripRc(i); Pane& p = g_pane[i];
-        const float top = s.t + 5.f, bot = s.b, newW = 28.f, gap = 3.f;
-        float x = s.l + 6.f;
+        if (dy < 0.f || dy >= Chrome::kTitleH) return 0;
+        for (int i = 0; i < 3; ++i) { auto r = CapBtnRect(i); if (dx >= r.left && dx < r.right) return i + 1; }
+        return 0;
+    }
+
+    // Window-level tabs (the active pane's) fill the title bar left of the caption.
+    void TopTabLayout(std::vector<D2D1_RECT_F>& rects, D2D1_RECT_F& newBtn)
+    {
+        Pane& p = AP();
+        const float top = 5.f, bot = Chrome::kTitleH, x0 = 8.f, newW = 34.f, gap = 2.f;
+        const float rightLimit = ViewW() - kCaptionW - 8.f;
+        float x = x0;
         const int n = std::max<int>(1, (int)p.tabs.size());
-        const float avail = s.r - 6.f - newW - gap - x;
-        const float tabW = std::clamp(avail / n - gap, 64.f, 200.f);
+        const float avail = rightLimit - newW - gap - x;
+        const float tabW = std::clamp(avail / n - gap, 88.f, 240.f);
         for (size_t t = 0; t < p.tabs.size(); ++t) { rects.push_back({ x, top, x + tabW, bot }); x += tabW + gap; }
-        newBtn = { x, top, x + newW, bot };
+        newBtn = { x + 2.f, top + 3.f, x + 2.f + newW, bot - 4.f };
     }
 
     int PaneAt(float dx, float dy)
@@ -939,30 +957,56 @@ void RunCommand(int id)
 
 // ================================================================ rendering ==
 
-void DrawStrip(ID2D1DeviceContext* dc, int i)
+// The window caption buttons (min / max / close) at the title bar's right end.
+void DrawCaption(ID2D1DeviceContext* dc)
 {
-    Rc s = StripRc(i); Pane& p = g_pane[i];
-    dc->FillRectangle({ s.l, s.t, s.r, s.b }, g_brStrip.Get());
+    const wchar_t* glyphs[3] = { L"\xE921", L"\xE922", L"\xE8BB" };   // minimize, maximize, close
+    if (g_maxed) glyphs[1] = L"\xE923";                              // restore glyph when maximized
+    for (int i = 0; i < 3; ++i)
+    {
+        const D2D1_RECT_F r = CapBtnRect(i);
+        const bool hov = (g_capHover == i + 1);
+        if (hov) dc->FillRectangle(r, (i == 2) ? g_brClose.Get() : g_brTabHover.Get());
+        ID2D1SolidColorBrush* fg = (i == 2 && hov) ? g_brText.Get() : g_brText2.Get();
+        dc->DrawText(glyphs[i], 1, g_capFmt.Get(), r, fg, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+}
 
-    std::vector<D2D1_RECT_F> rects; D2D1_RECT_F newBtn; TabLayout(i, rects, newBtn);
+// The merged title bar: window-level tabs (active pane) + caption buttons.
+void DrawTopBar(ID2D1DeviceContext* dc)
+{
+    const float W = ViewW(), T = Chrome::kTitleH;
+    dc->FillRectangle({ 0, 0, W, T }, g_brTitleBar.Get());
+
+    Pane& p = AP();
+    std::vector<D2D1_RECT_F> rects; D2D1_RECT_F newBtn; TopTabLayout(rects, newBtn);
     for (size_t t = 0; t < rects.size(); ++t)
     {
         const D2D1_RECT_F& r = rects[t];
         const bool act = (t == p.active);
-        const bool hov = (g_hoverTab.pane == i && g_hoverTab.tab == (int)t);
-        if (act) dc->FillRoundedRectangle({ { r.left, r.top, r.right, r.bottom + 5 }, 6, 6 }, g_brTabActive.Get());
-        else if (hov) dc->FillRoundedRectangle({ { r.left, r.top, r.right, r.bottom }, 6, 6 }, g_brTabHover.Get());
+        const bool hov = (g_hoverTab.tab == (int)t);
+        // Active tab is a rounded card in the toolbar colour so it reads as connected
+        // to the toolbar below; hovered inactive tabs get a subtle fill.
+        if (act)      dc->FillRoundedRectangle({ { r.left, r.top, r.right, T + 6.f }, 8, 8 }, g_brStrip.Get());
+        else if (hov) dc->FillRoundedRectangle({ { r.left, r.top + 2.f, r.right, T - 3.f }, 7, 7 }, g_brTabHover.Get());
 
-        std::wstring title = TabTitle(p.tabs[t]->path);
+        const std::wstring& tp = p.tabs[t]->path;
+        ID2D1Bitmap* ic = tp.empty()        ? g_icons->GetForParseName(dc, kHomeParse, false)
+                        : (tp == kThisPC)   ? g_icons->GetForParseName(dc, kThisPCParse, false)
+                        :                     g_icons->GetForPath(dc, tp, false);
+        float tx = r.left + 12.f;
+        if (ic) { const float iy = (T - 16.f) * 0.5f; dc->DrawBitmap(ic, { r.left + 10.f, iy, r.left + 26.f, iy + 16.f }); tx = r.left + 32.f; }
+
+        std::wstring title = TabTitle(tp);
         dc->DrawText(title.c_str(), (UINT32)title.size(), g_tabFmt.Get(),
-            { r.left + 10, r.top, r.right - 22, r.bottom }, act ? g_brText.Get() : g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            { tx, r.top, r.right - 24.f, T }, act ? g_brText.Get() : g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         if ((act || hov) && p.tabs.size() > 1)
-            dc->DrawText(L"\x2715", 1, g_glyphFmt.Get(), { r.right - 22, r.top, r.right - 4, r.bottom }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            dc->DrawText(L"\x2715", 1, g_glyphFmt.Get(), { r.right - 24.f, r.top, r.right - 6.f, T }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
+    if (g_hoverNewTab) dc->FillRoundedRectangle({ newBtn, 6, 6 }, g_brTabHover.Get());
     dc->DrawText(L"+", 1, g_glyphFmt.Get(), newBtn, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-    if (g_dual && i == g_activePane)   // active-pane marker
-        dc->FillRectangle({ s.l, s.b - 2, s.r, s.b }, g_brAccent.Get());
+    DrawCaption(dc);
 }
 
 // Search box: active input (editing) at top-right of the active pane, or a
@@ -1540,12 +1584,12 @@ void RenderFrame(bool caretOn, bool animating)
             dc->SetTransform(D2D1::Matrix3x2F::Identity());
             dc->PopAxisAlignedClip();
         }
-        DrawStrip(dc, i);
     }
     g_thumbs->EndFrame();          // worker may now drop off-screen requests
 
     if (g_sidebar) DrawSidebar(dc);
     if (g_details) DrawDetails(dc);
+    DrawTopBar(dc);                 // merged title bar (tabs + caption buttons)
     if (g_dual)   // splitter (brighter while dragging)
     {
         const float sx = SplitX();
@@ -1647,7 +1691,69 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_APP_THUMB: g_dirty = true; return 0;   // ready thumbnails uploaded next frame
     case WM_APP_NAVKIDS: { std::unique_ptr<NavKidsMsg> m(reinterpret_cast<NavKidsMsg*>(lParam)); ApplyNavKids(m.get()); return 0; }
 
+    // ---- custom (merged) title bar: reclaim the caption, draw our own ----
+    case WM_NCCALCSIZE:
+    {
+        if (wParam == FALSE) break;
+        NCCALCSIZE_PARAMS* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+        RECT& rc = p->rgrc[0];
+        const LONG origTop = rc.top;
+        const LRESULT r = DefWindowProcW(hwnd, WM_NCCALCSIZE, wParam, lParam);   // default side/bottom frame
+        if (r != 0) return r;
+        rc.top = origTop;                                                        // reclaim the caption
+        if (IsZoomed(hwnd)) rc.top += GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        return 0;
+    }
+
+    case WM_NCHITTEST:
+    {
+        POINT cl{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &cl);
+        RECT wr; GetClientRect(hwnd, &wr);
+        const int border = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        if (!IsZoomed(hwnd))   // resize borders (a slim top gutter keeps tabs clickable)
+        {
+            const bool L = cl.x < border, R = cl.x >= wr.right - border, T = cl.y < 6, B = cl.y >= wr.bottom - border;
+            if (T && L) return HTTOPLEFT;    if (T && R) return HTTOPRIGHT;
+            if (B && L) return HTBOTTOMLEFT; if (B && R) return HTBOTTOMRIGHT;
+            if (L) return HTLEFT;  if (R) return HTRIGHT;  if (T) return HTTOP;  if (B) return HTBOTTOM;
+        }
+        const float dx = dipX(cl.x), dy = dipY(cl.y);
+        if (dy < Chrome::kTitleH)
+        {
+            const int cb = CapHit(dx, dy);
+            if (cb == 1) return HTMINBUTTON;
+            if (cb == 2) return HTMAXBUTTON;
+            if (cb == 3) return HTCLOSE;
+            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
+            for (auto& rr : rects) if (dx >= rr.left && dx <= rr.right && dy >= rr.top) return HTCLIENT;
+            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) return HTCLIENT;
+            return HTCAPTION;   // draggable
+        }
+        return HTCLIENT;
+    }
+
+    case WM_NCLBUTTONDOWN:
+        if (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE) return 0;   // swallow; act on up
+        break;
+    case WM_NCLBUTTONUP:
+        if (wParam == HTMINBUTTON) { ShowWindow(hwnd, SW_MINIMIZE); return 0; }
+        if (wParam == HTMAXBUTTON) { ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); return 0; }
+        if (wParam == HTCLOSE)     { DestroyWindow(hwnd); return 0; }
+        break;
+    case WM_NCMOUSEMOVE:
+    {
+        const int h = (wParam == HTMINBUTTON) ? 1 : (wParam == HTMAXBUTTON) ? 2 : (wParam == HTCLOSE) ? 3 : 0;
+        if (h != g_capHover) { g_capHover = h; g_dirty = true; }
+        if (h) { TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0 }; TrackMouseEvent(&tme); }
+        break;
+    }
+    case WM_NCMOUSELEAVE:
+        if (g_capHover) { g_capHover = 0; g_dirty = true; }
+        break;
+
     case WM_SIZE:
+        g_maxed = (wParam == SIZE_MAXIMIZED) ? 1 : (wParam == SIZE_RESTORED ? 0 : g_maxed);
         if (g_pane[0].tabs.size())
         {
             g_gfx.Resize(LOWORD(lParam), HIWORD(lParam));
@@ -1717,23 +1823,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             BeginDrag(g_dragPane);   // modal OLE drag; returns after drop
             return 0;
         }
-        int newBtn = 0, hp = -1, ht = -1;
-        if (dy < ContentTop()) newBtn = g_chrome.HitButton(dx, dy);
-        else
+        int newBtn = 0, ht = -1; bool newTabHov = false;
+        if (dy >= Chrome::kTitleH && dy < ContentTop()) newBtn = g_chrome.HitButton(dx, dy);
+        else if (dy < Chrome::kTitleH)   // title-bar tabs (only the HTCLIENT tab/+ areas reach here)
         {
-            for (int i = 0; i < VisiblePanes(); ++i)
-            {
-                Rc st = StripRc(i);
-                if (dx >= st.l && dx < st.r && dy >= st.t && dy < st.b)
-                {
-                    std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TabLayout(i, rects, nb);
-                    for (size_t t = 0; t < rects.size(); ++t) if (dx >= rects[t].left && dx <= rects[t].right) { hp = i; ht = (int)t; break; }
-                    break;
-                }
-            }
+            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
+            for (size_t t = 0; t < rects.size(); ++t) if (dx >= rects[t].left && dx <= rects[t].right && dy >= rects[t].top) { ht = (int)t; break; }
+            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) newTabHov = true;
         }
         if (newBtn != g_hoverButton) { g_hoverButton = newBtn; g_dirty = true; }
-        if (hp != g_hoverTab.pane || ht != g_hoverTab.tab) { g_hoverTab.pane = hp; g_hoverTab.tab = ht; g_dirty = true; }
+        if (ht != g_hoverTab.tab) { g_hoverTab.tab = ht; g_hoverTab.pane = g_activePane; g_dirty = true; }
+        if (newTabHov != g_hoverNewTab) { g_hoverNewTab = newTabHov; g_dirty = true; }
 
         // Sidebar + Home-card hover.
         int newNav = -1;
@@ -1764,7 +1864,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_MOUSELEAVE:
-        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 }; g_hoverNav = -1; g_hoverCard = -1;
+        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 }; g_hoverNav = -1; g_hoverCard = -1; g_hoverNewTab = false;
         for (int i = 0; i < VisiblePanes(); ++i) if (!g_pane[i].tabs.empty()) g_pane[i].tabs[g_pane[i].active]->view->OnMouseLeave();
         g_dirty = true;
         return 0;
@@ -1808,6 +1908,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         { ClearFilter(); if (g_pal.open && g_pal.mode == 1) ClosePalette(); return 0; }
         if (g_pal.open && g_pal.mode == 1) ClosePalette();   // click elsewhere closes input, keeps filter
 
+        // Title-bar tabs (caption buttons are non-client; empty title area is drag).
+        if (dy < Chrome::kTitleH)
+        {
+            std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TopTabLayout(rects, nb);
+            if (dx >= nb.left && dx <= nb.right && dy >= nb.top && dy <= nb.bottom) { NewTab(g_activePane, AT().path, true); return 0; }
+            Pane& p = AP();
+            for (size_t t = 0; t < rects.size() && t < p.tabs.size(); ++t)
+                if (dx >= rects[t].left && dx <= rects[t].right)
+                {
+                    if (p.tabs.size() > 1 && dx >= rects[t].right - 26.f) CloseTab(g_activePane, t);
+                    else SwitchTab(g_activePane, t);
+                    return 0;
+                }
+            return 0;
+        }
         if (dy < ContentTop())
         {
             const int btn = g_chrome.HitButton(dx, dy);
@@ -1847,24 +1962,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Details pane is non-interactive; swallow clicks so they don't hit a pane.
         if (g_details && dx >= ViewW() - kDetailsW && dy >= ContentTop() && dy < ContentBottom())
             return 0;
-        // tab strips
-        for (int i = 0; i < VisiblePanes(); ++i)
-        {
-            Rc st = StripRc(i);
-            if (dx >= st.l && dx < st.r && dy >= st.t && dy < st.b)
-            {
-                std::vector<D2D1_RECT_F> rects; D2D1_RECT_F nb; TabLayout(i, rects, nb);
-                if (dx >= nb.left && dx <= nb.right) { g_activePane = i; NewTab(i, AT().path, true); return 0; }
-                for (size_t t = 0; t < rects.size(); ++t)
-                    if (dx >= rects[t].left && dx <= rects[t].right)
-                    {
-                        if (g_pane[i].tabs.size() > 1 && dx >= rects[t].right - 22) CloseTab(i, t);
-                        else SwitchTab(i, t);
-                        return 0;
-                    }
-                return 0;
-            }
-        }
         // list area
         int pane = PaneAt(dx, dy);
         if (pane >= 0 && dy >= ListRc(pane).t)
@@ -2125,6 +2222,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, nullptr, hInst, nullptr);
     if (!g_hwnd) return 1;
     ApplyWindowChrome(g_hwnd);
+    SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);   // apply custom frame
     g_curSizeWE = LoadCursorW(nullptr, IDC_SIZEWE);
 
     try
@@ -2172,6 +2270,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         g_fluentFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         mkfmt(L"Segoe Fluent Icons",     8.f,   DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_chevFmt);
         g_chevFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        mkfmt(L"Segoe Fluent Icons",     10.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_capFmt);
+        g_capFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         mkfmt(L"Segoe UI Variable Display", 18.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, true, g_homeHeadFmt);
         mkfmt(L"Segoe UI Variable Text", 16.f,  DWRITE_FONT_WEIGHT_SEMI_BOLD, false, false, g_detHeadFmt);
         mkfmt(L"Segoe UI Variable Text", 12.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_detKeyFmt);
