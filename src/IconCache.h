@@ -22,6 +22,10 @@ public:
     // Keyed by path (a handful of local roots), so the SHGetFileInfo touch is rare.
     ID2D1Bitmap* GetForPath(ID2D1DeviceContext* dc, const std::wstring& path, bool large);
 
+    // 48px extra-large icon for a path, from the shell's system image list — used
+    // by the details pane so known folders show their crisp, fully-coloured icon.
+    ID2D1Bitmap* GetLargeForPath(ID2D1DeviceContext* dc, const std::wstring& path);
+
 private:
     ComPtr<ID2D1Bitmap> Resolve(ID2D1DeviceContext* dc, const FileEntry& e, bool large);
     ComPtr<ID2D1Bitmap> FromHIcon(ID2D1DeviceContext* dc, HICON hic);

@@ -1,5 +1,6 @@
 #include "IconCache.h"
 #include <shellapi.h>
+#include <commoncontrols.h>   // IImageList / SHGetImageList (extra-large icons)
 #include <vector>
 
 ID2D1Bitmap* IconCache::Get(ID2D1DeviceContext* dc, const FileEntry& e, bool large)
@@ -34,6 +35,37 @@ ID2D1Bitmap* IconCache::GetForPath(ID2D1DeviceContext* dc, const std::wstring& p
     {
         bmp = FromHIcon(dc, sfi.hIcon);
         DestroyIcon(sfi.hIcon);
+    }
+    ID2D1Bitmap* raw = bmp.Get();
+    map_.emplace(std::move(key), std::move(bmp));
+    return raw;
+}
+
+ID2D1Bitmap* IconCache::GetLargeForPath(ID2D1DeviceContext* dc, const std::wstring& path)
+{
+    if (owner_ != dc) { map_.clear(); owner_ = dc; }
+    std::wstring key = L"XL|" + path;
+    auto it = map_.find(key);
+    if (it != map_.end()) return it->second.Get();
+
+    ComPtr<ID2D1Bitmap> bmp;
+    SHFILEINFOW sfi{};
+    // Resolve the shell icon index, then pull the 48px image from the
+    // SHIL_EXTRALARGE system image list — this carries the special coloured
+    // known-folder icons (Desktop/Downloads/Pictures/…) at full quality.
+    if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX))
+    {
+        IImageList* iml = nullptr;
+        if (SUCCEEDED(SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, reinterpret_cast<void**>(&iml))) && iml)
+        {
+            HICON hic = nullptr;
+            if (SUCCEEDED(iml->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hic)) && hic)
+            {
+                bmp = FromHIcon(dc, hic);
+                DestroyIcon(hic);
+            }
+            iml->Release();
+        }
     }
     ID2D1Bitmap* raw = bmp.Get();
     map_.emplace(std::move(key), std::move(bmp));

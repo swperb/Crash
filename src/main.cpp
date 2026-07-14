@@ -1255,11 +1255,18 @@ void DrawDetails(ID2D1DeviceContext* dc)
     const std::wstring full = e.isDrive ? e.target : Join(t.path, e.name);
     const float cx = (dp.left + dp.right) * 0.5f;
 
-    // Large icon, centred near the top.
-    ID2D1Bitmap* bmp = (e.isFolder || e.isDrive) ? g_icons->GetForPath(dc, full, true)
-                                                  : g_icons->Get(dc, e, true);
+    // Large icon, centred near the top: prefer the crisp 48px extra-large shell
+    // icon (colour known-folder icons); fall back to the kind/path icon.
+    ID2D1Bitmap* bmp = g_icons->GetLargeForPath(dc, full);
+    if (!bmp) bmp = (e.isFolder || e.isDrive) ? g_icons->GetForPath(dc, full, true)
+                                              : g_icons->Get(dc, e, true);
     float y = dp.top + 30.f;
-    if (bmp) { dc->DrawBitmap(bmp, { cx - 24.f, y, cx + 24.f, y + 48.f }); }
+    if (bmp)
+    {
+        const D2D1_SIZE_F px = bmp->GetSize();   // draw 1:1 at native size (up to 48)
+        const float s = (std::min)(48.f, (std::max)(px.width, px.height));
+        dc->DrawBitmap(bmp, { cx - s * 0.5f, y, cx + s * 0.5f, y + s });
+    }
     y += 62.f;
 
     // Name (up to two wrapped lines, centred).
