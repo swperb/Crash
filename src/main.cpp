@@ -26,6 +26,7 @@
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -601,6 +602,22 @@ void ApplySettings()
 void OpenSettings() { g_pal.open = false; g_settingsOpen = true; g_overlayKind = 2; if (!AnimationsEnabled()) g_overlayAnim = 1.f; g_dirty = true; }
 void CloseSettings() { g_settingsOpen = false; g_dirty = true; }
 
+// Prompt for a Crash.lic file and install it if the signature verifies.
+bool ImportLicenseInteractive(HWND hwnd)
+{
+    wchar_t file[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Crash license (*.lic)\0*.lic\0All files\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Import your Crash Pro license";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetOpenFileNameW(&ofn)) return false;
+    return ImportLicense(file);
+}
+
 void StartRename()
 {
     if (g_renaming) return;
@@ -937,7 +954,7 @@ void DrawPalette(ID2D1DeviceContext* dc, float viewW, float viewH, bool caretOn,
     const float tx = ix + 28.f;
     if (g_pal.input.empty())
     {
-        const wchar_t* ph2 = (g_pal.mode == 2) ? L"Enter license key…" : L"Type a command…";
+        const wchar_t* ph2 = (g_pal.mode == 2) ? L"Import a license file to unlock Pro" : L"Type a command…";
         dc->DrawText(ph2, (UINT32)wcslen(ph2), g_palInputFmt.Get(), { tx, py, px + pw - 20, py + inputH }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     else
@@ -970,8 +987,8 @@ void DrawPalette(ID2D1DeviceContext* dc, float viewW, float viewH, bool caretOn,
     {
         const float my = py + inputH + 8.f;
         dc->DrawText(g_pal.message.c_str(), (UINT32)g_pal.message.size(), g_tabFmt.Get(), { px + 22, my, px + pw - 22, my + 24 }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        std::wstring hint = L"Demo key: "; hint += kDemoLicenseKey; hint += L"   ·   Enter to unlock, Esc to cancel";
-        dc->DrawText(hint.c_str(), (UINT32)hint.size(), g_tabFmt.Get(), { px + 22, my + 28, px + pw - 22, my + 52 }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        const wchar_t* hint = L"Press Enter to import your Crash.lic license file   ·   Esc to cancel";
+        dc->DrawText(hint, (UINT32)wcslen(hint), g_tabFmt.Get(), { px + 22, my + 28, px + pw - 22, my + 52 }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     dc->SetTransform(D2D1::Matrix3x2F::Identity());
 }
@@ -987,7 +1004,7 @@ void ApplySettingHit(int action, int value)
     case 5: g_settings.thumbnails = (value == 1); break;
     case 6: g_settings.animations = (value == 1); break;
     case 7: CloseSettings(); return;
-    case 8: CloseSettings(); OpenPalette(0); return;   // unlock → license flow
+    case 8: if (ImportLicenseInteractive(g_hwnd)) g_pro = true; g_dirty = true; return;   // unlock → import license
     default: return;
     }
     ApplySettings();
@@ -1527,7 +1544,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             case VK_RETURN:
                 if (g_pal.mode == 0) { if (!g_pal.items.empty()) { int cmd = g_pal.items[g_pal.sel].cmd; if (cmd == CMD_FILTER) { OpenPalette(1); return 0; } ClosePalette(); RunCommand(cmd); } else ClosePalette(); }
                 else if (g_pal.mode == 1) { if (g_searchArmed) { g_searchArmed = false; std::wstring q = g_pal.input; ClosePalette(); RunRecursiveSearch(q); } else ClosePalette(); }
-                else if (g_pal.mode == 2) { if (UnlockPro(g_pal.input)) { g_pro = true; OpenPalette(0); } else { g_pal.message = L"Invalid license key. Try again."; g_pal.input.clear(); g_pal.caret = 0; g_dirty = true; } }
+                else if (g_pal.mode == 2) { if (ImportLicenseInteractive(hwnd)) { g_pro = true; OpenPalette(0); } else { g_pal.message = L"That license file couldn't be verified."; g_dirty = true; } }
                 return 0;
             case VK_BACK:   if (g_pal.caret > 0) { g_pal.input.erase(g_pal.caret - 1, 1); --g_pal.caret; OnPaletteInputChanged(); } return 0;
             case VK_DELETE: if (g_pal.caret < g_pal.input.size()) { g_pal.input.erase(g_pal.caret, 1); OnPaletteInputChanged(); } return 0;

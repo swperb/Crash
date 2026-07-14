@@ -5,7 +5,9 @@ How Crash sells and unlocks Pro. Companion to
 §10 (open-core boundary). This document is the plan for replacing the demo gate
 in [`../src/License.cpp`](../src/License.cpp) with a real system.
 
-> Status: **design**. Nothing here is implemented yet except the app-side stub.
+> Status: **design**, with **build-order step 1 implemented** — the app verifies
+> real signed licenses offline (`src/License.cpp`) and mints them with a dev CLI
+> (`tools/crashlicense.cpp`). The commerce backend (steps 3–4) is not built yet.
 
 ---
 
@@ -126,9 +128,15 @@ short support key for the re-download page.
   with the public key, then check `prod=="crash"`, `ed=="pro"`, and (if we ship
   update-gated perpetual) that the running build date ≤ `updatesUntil` or
   `updatesUntil==0`.
-- Crypto lib: **Monocypher** (single-file, public-domain, audited) or
-  `ed25519-donna`. Windows CNG's Ed25519 support is too version-dependent to
-  rely on. This is one vendored `.c` file — small, no dependency risk.
+- Crypto: **shipped as ECDSA P-256 + SHA-256 via Windows CNG** (`BCrypt`), not
+  Ed25519. CNG supports P-256 natively, so there is **zero vendored crypto** — no
+  `.c` file to audit or keep updated — while keeping the same offline,
+  public-key-verifiable property. (Ed25519 would require vendoring Monocypher or
+  `ed25519-donna` since CNG's Ed25519 support is too version-dependent to rely
+  on; not worth the dependency here.) The signed blob and verification flow are
+  otherwise exactly as described. Implemented in
+  [`../src/License.cpp`](../src/License.cpp); keys/licenses minted by
+  [`../tools/crashlicense.cpp`](../tools/crashlicense.cpp).
 
 Because verification is a pure signature check, it works **fully offline**,
 satisfying Principle 1.
@@ -235,10 +243,10 @@ the processor dashboard.
 
 ## 9. Build order
 
-1. **App-side verification** — vendor Monocypher, embed a public key, make
-   `License.cpp` verify a signed `Crash.lic` (+ **Import license…** UI). Generate
-   test licenses with a local CLI holding the dev private key. *No backend needed
-   to develop/test this.*
+1. ✅ **App-side verification** *(done)* — `License.cpp` verifies a signed
+   `Crash.lic` offline (ECDSA P-256 / CNG, embedded public key) with an **Import
+   license…** file picker; `tools/crashlicense.cpp` mints test licenses from a dev
+   private key. Verified: valid license unlocks Pro, tampered license is rejected.
 2. **Open-core split** — extract Pro into `crash_pro.dll` behind the ABI.
 3. **License Service** — Cloudflare Worker: webhook → sign → email; re-download.
 4. **Processor** — wire Lemon Squeezy/Paddle checkout + webhook; go live.

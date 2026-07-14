@@ -27,9 +27,14 @@ target_compile_definitions(crash PRIVATE
 )
 
 target_link_libraries(crash PRIVATE
-    d3d11 d2d1 dwrite dcomp dxgi dwmapi shell32 ole32
+    d3d11 d2d1 dwrite dcomp dxgi dwmapi shell32 ole32 bcrypt crypt32 comdlg32
 )
+
+# Developer tool: generate signing keys and mint Crash Pro licenses.
+add_executable(crashlicense tools/crashlicense.cpp)
+target_link_libraries(crashlicense PRIVATE bcrypt crypt32)
 
 if (MSVC)
     target_compile_options(crash PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_compile_options(crashlicense PRIVATE /W4 /utf-8 /EHsc)
 endif()

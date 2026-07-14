@@ -1,15 +1,14 @@
-// License — the open-core Pro gate (design doc §2.3, §6.6). Pro features (the
-// command palette, later scripting/advanced search) unlock when a valid license
-// is present. Real builds would validate a signed key from the commerce backend;
-// this is a stand-in with a demo key so the flow is exercisable end-to-end.
+// License — the open-core Pro gate (design doc §2.3, §6.6; see docs/licensing.md).
+//
+// A license is a signed `Crash.lic` file: `key=value` lines plus an ECDSA
+// (P-256 / SHA-256) signature. The app embeds only the PUBLIC key and verifies
+// the signature offline — no phone-home. Signing keys are minted by the
+// `crashlicense` dev tool; the private key never ships.
 #pragma once
 #include <string>
 
-// The demo unlock key (shown in the unlock prompt).
-inline const wchar_t* kDemoLicenseKey = L"CRASH-PRO-2026";
-
-// True if a valid license file is present.
+// True if a valid signed license is installed (%LOCALAPPDATA%\Crash\Crash.lic).
 bool IsLicensed();
 
-// Validate `key`; on success persist it and return true.
-bool UnlockPro(const std::wstring& key);
+// Validate the .lic at srcPath; on success install it and return true.
+bool ImportLicense(const std::wstring& srcPath);
