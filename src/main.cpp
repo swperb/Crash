@@ -98,6 +98,22 @@ namespace
     bool g_pro = false;                          // Pro (open-core) unlocked
     std::wstring g_home;
 
+    // Native-Explorer chrome: a left navigation sidebar and a right details pane
+    // inset the content region; a distinct Home landing page shows when a tab is
+    // at the root (empty path).
+    constexpr float kSidebarW = 240.f;
+    constexpr float kDetailsW = 300.f;
+    bool g_sidebar = true;
+    bool g_details = true;
+    int  g_hoverNav = -1;                         // hovered sidebar row
+    int  g_hoverCard = -1;                        // hovered Home card
+
+    struct NavItem { std::wstring label, path; int kind; };   // kind 0 folder, 1 header, 2 drive, 3 home
+    std::vector<NavItem>     g_nav;
+    std::vector<D2D1_RECT_F> g_navRects;          // parallels g_nav, rebuilt per draw
+    std::vector<D2D1_RECT_F> g_homeCardRects;     // parallels the Home cards, rebuilt per draw
+    std::vector<int>         g_homeCardNav;       // g_nav index each Home card maps to
+
     // Command palette / search overlay (§6.6).
     struct PalItem { int cmd; std::wstring title, cat; int score; };
     struct PaletteState
@@ -159,7 +175,7 @@ namespace
     }
     std::wstring TabTitle(const std::wstring& p)
     {
-        if (p.empty()) return L"This PC";
+        if (p.empty()) return L"Home";
         if (p.size() == 3 && p[1] == L':' && p[2] == L'\\') return p.substr(0, 2);
         std::wstring s = p;
         if (s.back() == L'\\') s.pop_back();
@@ -179,7 +195,7 @@ struct ChromeSeg { std::wstring label, path; };
 struct ChromeState
 {
     std::wstring statusLeft, statusRight;
-    bool backEnabled = false, fwdEnabled = false, upEnabled = false, dualOn = false;
+    bool backEnabled = false, fwdEnabled = false, upEnabled = false, dualOn = false, detailsOn = false;
     int hoverButton = 0;
     std::vector<ChromeSeg> segments;
     bool editing = false;
@@ -257,11 +273,14 @@ public:
 
     static D2D1_RECT_F Btn(int i) { float x = 8.f + i * 36.f; return { x, 8.f, x + 32.f, 40.f }; }
     static D2D1_RECT_F GearRect(float viewW) { return { viewW - 44.f, 8.f, viewW - 12.f, 40.f }; }
+    static D2D1_RECT_F DetailsRect(float viewW) { return { viewW - 88.f, 8.f, viewW - 56.f, 40.f }; }
     int HitButton(float x, float y) const
     {
         for (int i = 0; i < 4; ++i) { auto r = Btn(i); if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i + 1; }
         auto g = GearRect(lastViewW_);
         if (x >= g.left && x <= g.right && y >= g.top && y <= g.bottom) return 5;   // settings
+        auto d = DetailsRect(lastViewW_);
+        if (x >= d.left && x <= d.right && y >= d.top && y <= d.bottom) return 6;    // details toggle
         return 0;
     }
     void InvalidateBrushes() { owner_ = nullptr; }
@@ -311,15 +330,25 @@ public:
             }
         }
 
-        // Settings (gear) button at the right end of the toolbar.
+        // Details-pane toggle + Settings (gear) at the right end of the toolbar.
+        {
+            D2D1_RECT_F d = DetailsRect(viewW);
+            if (s.detailsOn) dc->FillRoundedRectangle({ d, 5, 5 }, brActive_.Get());
+            else if (s.hoverButton == 6) dc->FillRoundedRectangle({ d, 5, 5 }, brHover_.Get());
+            // Icon: a panel with a highlighted right column (like Explorer's details toggle).
+            const float dl = d.left + 8, dt = d.top + 9, dr = d.right - 8, db = d.bottom - 9;
+            dc->DrawRectangle({ dl, dt, dr, db }, brText_.Get(), 1.3f);
+            dc->DrawLine({ dr - 8, dt }, { dr - 8, db }, brText_.Get(), 1.3f);
+            dc->FillRectangle({ dr - 7.5f, dt + 1, dr - 0.5f, db - 0.5f }, brText2_.Get());
+        }
         {
             D2D1_RECT_F g = GearRect(viewW);
             if (s.hoverButton == 5) dc->FillRoundedRectangle({ g, 5, 5 }, brHover_.Get());
             dc->DrawText(L"\x2699", 1, glyph_.Get(), g, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // Address: breadcrumb or inline editor (leaves room for the gear).
-        D2D1_RECT_F addr{ kAddrLeft, 8.f, viewW - 56.f, 40.f };
+        // Address: breadcrumb or inline editor (leaves room for details + gear).
+        D2D1_RECT_F addr{ kAddrLeft, 8.f, viewW - 96.f, 40.f };
         lastAddr_ = addr;
         dc->FillRoundedRectangle({ addr, 4, 4 }, brCtrl_.Get());
         dc->PushAxisAlignedClip({ addr.left + 2, addr.top, addr.right - 2, addr.bottom }, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -372,6 +401,7 @@ Chrome g_chrome;
 namespace
 {
     ComPtr<IDWriteTextFormat> g_tabFmt, g_glyphFmt, g_palTitleFmt, g_palInputFmt;
+    ComPtr<IDWriteTextFormat> g_navFmt, g_secFmt, g_fluentFmt, g_homeHeadFmt, g_detHeadFmt, g_detKeyFmt;
     ID2D1DeviceContext* g_brOwner = nullptr;
     ComPtr<ID2D1SolidColorBrush> g_brStrip, g_brTabActive, g_brTabHover, g_brText, g_brText2, g_brAccent, g_brLine,
         g_brDim, g_brPanel, g_brSelBg, g_brCtrl;
@@ -399,18 +429,22 @@ namespace
     float ViewH() { return g_gfx.HeightDip(); }
     float ContentTop() { return Chrome::kToolbarH; }
     float ContentBottom() { return ViewH() - Chrome::kStatusH; }
+    // The panes live between the sidebar (left) and the details pane (right).
+    float ContentLeft()  { return g_sidebar ? kSidebarW : 0.f; }
+    float ContentRight() { return ViewW() - (g_details ? kDetailsW : 0.f); }
+    float ContentW()     { return ContentRight() - ContentLeft(); }
 
     float SplitX()
     {
-        const float w = ViewW();
-        return std::floor(std::clamp(w * g_splitRatio, kMinPaneW, (std::max)(kMinPaneW, w - kMinPaneW)));
+        const float l = ContentLeft(), r = ContentRight(), w = r - l;
+        return std::floor(l + std::clamp(w * g_splitRatio, kMinPaneW, (std::max)(kMinPaneW, w - kMinPaneW)));
     }
     Rc PaneRc(int i)
     {
-        const float top = ContentTop(), bot = ContentBottom(), w = ViewW();
-        if (!g_dual) return { 0, top, w, bot };
+        const float top = ContentTop(), bot = ContentBottom(), l = ContentLeft(), r = ContentRight();
+        if (!g_dual) return { l, top, r, bot };
         const float sx = SplitX();
-        return (i == 0) ? Rc{ 0, top, sx, bot } : Rc{ sx + 1, top, w, bot };
+        return (i == 0) ? Rc{ l, top, sx, bot } : Rc{ sx + 1, top, r, bot };
     }
     bool OverSplitter(float dx, float dy)
     {
@@ -418,6 +452,9 @@ namespace
         const float sx = SplitX();
         return dy >= ContentTop() && dy < ContentBottom() && dx >= sx - 4.f && dx <= sx + 4.f;
     }
+    D2D1_RECT_F SidebarRc() { return { 0, ContentTop(), kSidebarW, ContentBottom() }; }
+    D2D1_RECT_F DetailsRc() { return { ViewW() - kDetailsW, ContentTop(), ViewW(), ContentBottom() }; }
+    bool IsHome(const Tab& t) { return t.path.empty(); }
     Rc StripRc(int i) { Rc p = PaneRc(i); return { p.l, p.t, p.r, p.t + kTabStripH }; }
     Rc ListRc(int i) { Rc p = PaneRc(i); return { p.l, p.t + kTabStripH, p.r, p.b }; }
 
@@ -561,7 +598,7 @@ void UpdateTitleBar()
 {
     if (!g_hwnd) return;
     const std::wstring& path = AT().path;
-    std::wstring disp = path.empty() ? std::wstring(L"This PC") : path;
+    std::wstring disp = path.empty() ? std::wstring(L"Home") : path;
     SetWindowTextW(g_hwnd, (disp + L"  —  Crash").c_str());
 }
 
@@ -674,7 +711,7 @@ void BeginDrag(int pane)
 std::vector<ChromeSeg> BuildSegments(const std::wstring& path)
 {
     std::vector<ChromeSeg> segs;
-    segs.push_back({ L"This PC", L"" });
+    segs.push_back({ L"Home", L"" });
     if (!path.empty())
     {
         std::wstring drive = path.substr(0, 2);
@@ -1101,6 +1138,207 @@ void DrawRename(ID2D1DeviceContext* dc, bool caretOn)
     }
 }
 
+// ============================================ sidebar / details / home page ==
+
+std::wstring KnownFolder(REFKNOWNFOLDERID id)
+{
+    PWSTR p = nullptr; std::wstring s;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, 0, nullptr, &p))) { s = p; CoTaskMemFree(p); }
+    return s;
+}
+
+// Build the navigation model: Home, pinned Quick access folders, then This PC
+// with its drives. Rebuilt at startup (drives rarely change during a session).
+void BuildNav()
+{
+    g_nav.clear();
+    g_nav.push_back({ L"Home", L"", 3 });
+
+    auto add = [&](const wchar_t* label, REFKNOWNFOLDERID id) {
+        std::wstring p = KnownFolder(id);
+        if (!p.empty()) g_nav.push_back({ label, p, 0 });
+    };
+    add(L"Desktop",   FOLDERID_Desktop);
+    add(L"Downloads", FOLDERID_Downloads);
+    add(L"Documents", FOLDERID_Documents);
+    add(L"Pictures",  FOLDERID_Pictures);
+    add(L"Music",     FOLDERID_Music);
+    add(L"Videos",    FOLDERID_Videos);
+
+    g_nav.push_back({ L"This PC", L"", 1 });   // section header
+
+    wchar_t buf[512] = L"";
+    if (GetLogicalDriveStringsW(511, buf))
+        for (wchar_t* d = buf; *d; d += wcslen(d) + 1)
+        {
+            std::wstring root = d;                       // "C:\"
+            std::wstring letter = root.substr(0, 2);     // "C:"
+            wchar_t vol[MAX_PATH] = L"";
+            if (GetDriveTypeW(root.c_str()) == DRIVE_FIXED)
+                GetVolumeInformationW(root.c_str(), vol, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0);
+            std::wstring disp = (vol[0] ? std::wstring(vol) : std::wstring(L"Local Disk")) + L" (" + letter + L")";
+            g_nav.push_back({ disp, root, 2 });
+        }
+}
+
+void DrawSidebar(ID2D1DeviceContext* dc)
+{
+    const D2D1_RECT_F sb = SidebarRc();
+    dc->FillRectangle(sb, g_brStrip.Get());
+    dc->DrawLine({ sb.right - 0.5f, sb.top }, { sb.right - 0.5f, sb.bottom }, g_brLine.Get(), 1.f);
+    dc->PushAxisAlignedClip(sb, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    const std::wstring& cur = AT().path;
+    g_navRects.assign(g_nav.size(), D2D1_RECT_F{ 0, 0, 0, 0 });
+    const float rowH = 32.f;
+    float y = sb.top + 8.f;
+    for (size_t i = 0; i < g_nav.size(); ++i)
+    {
+        const NavItem& it = g_nav[i];
+        if (it.kind == 1)   // section header
+        {
+            y += 10.f;
+            dc->DrawText(it.label.c_str(), (UINT32)it.label.size(), g_secFmt.Get(),
+                { sb.left + 18.f, y, sb.right - 8.f, y + 20.f }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            y += 24.f;
+            continue;
+        }
+        const D2D1_RECT_F r{ sb.left + 6.f, y, sb.right - 6.f, y + rowH };
+        g_navRects[i] = r;
+        const bool active = (it.path == cur);
+        if (active)                       dc->FillRoundedRectangle({ r, 5, 5 }, g_brSelBg.Get());
+        else if ((int)i == g_hoverNav)    dc->FillRoundedRectangle({ r, 5, 5 }, g_brTabHover.Get());
+        if (active) dc->FillRoundedRectangle({ { r.left + 1.f, r.top + 8.f, r.left + 4.f, r.bottom - 8.f }, 1.5f, 1.5f }, g_brAccent.Get());
+
+        const float ix = sb.left + 18.f, iy = y + (rowH - 16.f) * 0.5f;
+        if (it.kind == 3)   // Home glyph (Segoe Fluent Icons)
+            dc->DrawText(L"\xE80F", 1, g_fluentFmt.Get(), { ix - 2, y, ix + 18, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        else if (ID2D1Bitmap* bmp = g_icons->GetForPath(dc, it.path, false))
+            dc->DrawBitmap(bmp, { ix, iy, ix + 16, iy + 16 });
+
+        dc->DrawText(it.label.c_str(), (UINT32)it.label.size(), g_navFmt.Get(),
+            { sb.left + 44.f, y, sb.right - 12.f, y + rowH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        y += rowH;
+    }
+    dc->PopAxisAlignedClip();
+}
+
+void DrawDetails(ID2D1DeviceContext* dc)
+{
+    const D2D1_RECT_F dp = DetailsRc();
+    dc->FillRectangle(dp, g_brStrip.Get());
+    dc->DrawLine({ dp.left + 0.5f, dp.top }, { dp.left + 0.5f, dp.bottom }, g_brLine.Get(), 1.f);
+    dc->PushAxisAlignedClip(dp, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    const float pad = 22.f, L = dp.left + pad, R = dp.right - pad;
+    Tab& t = AT();
+    std::vector<size_t> sels = t.view ? t.view->SelectedIndices() : std::vector<size_t>{};
+
+    if (IsHome(t) || sels.empty())
+    {
+        const wchar_t* msg = L"Select a file or folder to see its details.";
+        dc->DrawText(msg, (UINT32)wcslen(msg), g_navFmt.Get(),
+            { L, dp.top + 28.f, R, dp.top + 120.f }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        dc->PopAxisAlignedClip();
+        return;
+    }
+    if (sels.size() > 1)
+    {
+        std::wstring head = std::to_wstring(sels.size()) + L" items selected";
+        dc->DrawText(head.c_str(), (UINT32)head.size(), g_detHeadFmt.Get(),
+            { L, dp.top + 28.f, R, dp.top + 60.f }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        dc->PopAxisAlignedClip();
+        return;
+    }
+
+    const FileEntry& e = t.model->At(sels[0]);
+    const std::wstring full = e.isDrive ? e.target : Join(t.path, e.name);
+    const float cx = (dp.left + dp.right) * 0.5f;
+
+    // Large icon, centred near the top.
+    ID2D1Bitmap* bmp = (e.isFolder || e.isDrive) ? g_icons->GetForPath(dc, full, true)
+                                                  : g_icons->Get(dc, e, true);
+    float y = dp.top + 30.f;
+    if (bmp) { dc->DrawBitmap(bmp, { cx - 24.f, y, cx + 24.f, y + 48.f }); }
+    y += 62.f;
+
+    // Name (up to two wrapped lines, centred).
+    {
+        ComPtr<IDWriteTextLayout> nl;
+        if (SUCCEEDED(g_gfx.DWrite()->CreateTextLayout(e.name.c_str(), (UINT32)e.name.size(),
+                g_detHeadFmt.Get(), R - L, 60.f, &nl)))
+        {
+            nl->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            DWRITE_TEXT_METRICS m{}; nl->GetMetrics(&m);
+            dc->DrawTextLayout({ L, y }, nl.Get(), g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            y += (std::min)(m.height, 48.f) + 14.f;
+        }
+    }
+    dc->DrawLine({ L, y }, { R, y }, g_brLine.Get(), 1.f);
+    y += 14.f;
+
+    // Metadata rows.
+    auto row = [&](const wchar_t* key, const std::wstring& val) {
+        if (val.empty()) return;
+        dc->DrawText(key, (UINT32)wcslen(key), g_detKeyFmt.Get(),
+            { L, y, L + 92.f, y + 20.f }, g_brText2.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        dc->DrawText(val.c_str(), (UINT32)val.size(), g_navFmt.Get(),
+            { L + 96.f, y, R, y + 20.f }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        y += 26.f;
+    };
+    row(L"Type", e.typeText);
+    if (!e.isFolder && !e.isDrive) row(L"Size", e.sizeText);
+    row(L"Modified", e.dateText);
+    dc->PopAxisAlignedClip();
+}
+
+// The Home landing page: Quick access + Devices cards. Drawn into a pane's list
+// rect (below its tab strip) when the active tab is at the root. Hit rects are
+// appended to g_homeCardRects/g_homeCardNav (cleared once per frame in RenderFrame).
+void DrawHome(ID2D1DeviceContext* dc, const Rc& area)
+{
+    const float pad = 24.f;
+    const float x0 = area.l + pad;
+    const float innerW = (area.r - area.l) - pad * 2.f;
+    float y = area.t + pad;
+
+    auto section = [&](const wchar_t* title) {
+        dc->DrawText(title, (UINT32)wcslen(title), g_homeHeadFmt.Get(),
+            { x0, y, area.r - pad, y + 30.f }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        y += 42.f;
+    };
+    auto cardsFor = [&](int kind) {
+        const float cardH = 60.f, gap = 12.f, cardMin = 200.f;
+        const int cols = (std::max)(1, (int)((innerW + gap) / (cardMin + gap)));
+        const float cw = (innerW - gap * (cols - 1)) / cols;
+        int col = 0; float rowY = y;
+        for (size_t i = 0; i < g_nav.size(); ++i)
+        {
+            if (g_nav[i].kind != kind) continue;
+            const float cxp = x0 + col * (cw + gap);
+            const D2D1_RECT_F r{ cxp, rowY, cxp + cw, rowY + cardH };
+            const bool hov = ((int)g_homeCardRects.size() == g_hoverCard);
+            dc->FillRoundedRectangle({ r, 8, 8 }, hov ? g_brTabHover.Get() : g_brCtrl.Get());
+            dc->DrawRoundedRectangle({ r, 8, 8 }, g_brLine.Get(), 1.f);
+            const float iy = rowY + (cardH - 32.f) * 0.5f;
+            if (ID2D1Bitmap* bmp = g_icons->GetForPath(dc, g_nav[i].path, true))
+                dc->DrawBitmap(bmp, { cxp + 14.f, iy, cxp + 46.f, iy + 32.f });
+            dc->DrawText(g_nav[i].label.c_str(), (UINT32)g_nav[i].label.size(), g_navFmt.Get(),
+                { cxp + 58.f, rowY, r.right - 10.f, rowY + cardH }, g_brText.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            g_homeCardRects.push_back(r); g_homeCardNav.push_back((int)i);
+            if (++col >= cols) { col = 0; rowY += cardH + gap; }
+        }
+        if (col != 0) rowY += cardH + gap;
+        y = rowY + 10.f;
+    };
+
+    section(L"Quick access");
+    cardsFor(0);
+    y += 6.f;
+    section(L"Devices and drives");
+    cardsFor(2);
+}
+
 void RenderFrame(bool caretOn, bool animating)
 {
     ID2D1DeviceContext* dc = g_gfx.BeginFrame();
@@ -1109,21 +1347,34 @@ void RenderFrame(bool caretOn, bool animating)
     dc->Clear(g_theme.windowBg);
 
     g_thumbs->BeginFrame();        // collect visible thumbnail keys across all panes
+    g_homeCardRects.clear(); g_homeCardNav.clear();
     for (int i = 0; i < VisiblePanes(); ++i)
     {
         Pane& p = g_pane[i];
         if (p.tabs.empty()) continue;
         Rc lr = ListRc(i);
         D2D1_RECT_F clip{ lr.l, lr.t, lr.r, lr.b };
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
-        dc->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
-        dc->SetTransform(D2D1::Matrix3x2F::Translation(lr.l, lr.t));
-        p.tabs[p.active]->view->Render(dc);
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
-        dc->PopAxisAlignedClip();
+        if (IsHome(*p.tabs[p.active]))    // Home landing page instead of the file list
+        {
+            dc->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            DrawHome(dc, lr);
+            dc->PopAxisAlignedClip();
+        }
+        else
+        {
+            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            dc->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            dc->SetTransform(D2D1::Matrix3x2F::Translation(lr.l, lr.t));
+            p.tabs[p.active]->view->Render(dc);
+            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            dc->PopAxisAlignedClip();
+        }
         DrawStrip(dc, i);
     }
     g_thumbs->EndFrame();          // worker may now drop off-screen requests
+
+    if (g_sidebar) DrawSidebar(dc);
+    if (g_details) DrawDetails(dc);
     if (g_dual)   // splitter (brighter while dragging)
     {
         const float sx = SplitX();
@@ -1139,6 +1390,7 @@ void RenderFrame(bool caretOn, bool animating)
     cs.fwdEnabled = !at.forward.empty();
     cs.upEnabled = !at.path.empty();
     cs.dualOn = g_dual;
+    cs.detailsOn = g_details;
     cs.hoverButton = g_hoverButton;
     cs.editing = g_addr.active; cs.editText = g_addr.text; cs.caret = g_addr.caret; cs.selAll = g_addr.selAll; cs.caretOn = caretOn;
 
@@ -1260,7 +1512,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         const float dx = dipX(xp), dy = dipY(yp);
         if (g_draggingSplit)
         {
-            g_splitRatio = std::clamp(dx / ViewW(), 0.12f, 0.88f);
+            g_splitRatio = std::clamp((dx - ContentLeft()) / ContentW(), 0.12f, 0.88f);
             SetViewports(); g_dirty = true;
             return 0;
         }
@@ -1304,6 +1556,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (newBtn != g_hoverButton) { g_hoverButton = newBtn; g_dirty = true; }
         if (hp != g_hoverTab.pane || ht != g_hoverTab.tab) { g_hoverTab.pane = hp; g_hoverTab.tab = ht; g_dirty = true; }
 
+        // Sidebar + Home-card hover.
+        int newNav = -1;
+        if (g_sidebar && dx < kSidebarW && dy >= ContentTop() && dy < ContentBottom())
+            for (size_t i = 0; i < g_navRects.size(); ++i)
+            { const auto& r = g_navRects[i]; if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom) { newNav = (int)i; break; } }
+        if (newNav != g_hoverNav) { g_hoverNav = newNav; g_dirty = true; }
+        int newCard = -1;
+        if (dy >= ContentTop())
+            for (size_t i = 0; i < g_homeCardRects.size(); ++i)
+            { const auto& r = g_homeCardRects[i]; if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom) { newCard = (int)i; break; } }
+        if (newCard != g_hoverCard) { g_hoverCard = newCard; g_dirty = true; }
+
         int pane = PaneAt(dx, dy);
         if (pane >= 0 && dy >= ListRc(pane).t)
         {
@@ -1314,7 +1578,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_MOUSELEAVE:
-        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 };
+        g_mouseTracked = false; g_hoverButton = 0; g_hoverTab = { -1, -1 }; g_hoverNav = -1; g_hoverCard = -1;
         for (int i = 0; i < VisiblePanes(); ++i) if (!g_pane[i].tabs.empty()) g_pane[i].tabs[g_pane[i].active]->view->OnMouseLeave();
         g_dirty = true;
         return 0;
@@ -1366,6 +1630,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             else if (btn == 3) GoUp();
             else if (btn == 4) ToggleDual();
             else if (btn == 5) OpenSettings();
+            else if (btn == 6) { g_details = !g_details; SetViewports(); g_dirty = true; }
             else
             {
                 std::wstring segPath;
@@ -1375,6 +1640,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
+        // Left navigation sidebar.
+        if (g_sidebar && dx < kSidebarW && dy >= ContentTop() && dy < ContentBottom())
+        {
+            for (size_t i = 0; i < g_navRects.size(); ++i)
+            {
+                const auto& r = g_navRects[i];
+                if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom)
+                { g_addr.Cancel(); NavigateTab(g_activePane, &AT(), g_nav[i].path); break; }
+            }
+            return 0;
+        }
+        // Details pane is non-interactive; swallow clicks so they don't hit a pane.
+        if (g_details && dx >= ViewW() - kDetailsW && dy >= ContentTop() && dy < ContentBottom())
+            return 0;
         // tab strips
         for (int i = 0; i < VisiblePanes(); ++i)
         {
@@ -1399,6 +1678,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             if (g_addr.active) { g_addr.Cancel(); g_dirty = true; }
             ActivatePane(pane);
+            if (IsHome(AT()))   // Home page cards
+            {
+                for (size_t i = 0; i < g_homeCardRects.size(); ++i)
+                {
+                    const auto& r = g_homeCardRects[i];
+                    if (dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom)
+                    { NavigateTab(pane, &AT(), g_nav[g_homeCardNav[i]].path); break; }
+                }
+                return 0;
+            }
             int lx, ly; ListLocal(pane, xp, yp, &lx, &ly);
             const int div = AT().view->HeaderDividerAt(lx, ly);
             if (div >= 0) { g_colResizePane = pane; g_colResizeWhich = div; SetCapture(hwnd); return 0; }
@@ -1674,10 +1963,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.f, L"en-us", &g_palInputFmt), "palInput");
         g_palInputFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         g_palInputFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+        // Sidebar / details / Home formats.
+        auto mkfmt = [&](const wchar_t* fam, float size, DWRITE_FONT_WEIGHT w, bool vcenter, bool nowrap, ComPtr<IDWriteTextFormat>& out) {
+            HR(g_gfx.DWrite()->CreateTextFormat(fam, nullptr, w, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", &out), "fmt");
+            if (vcenter) out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (nowrap) { out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                DWRITE_TRIMMING tr{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 }; ComPtr<IDWriteInlineObject> sign;
+                if (SUCCEEDED(g_gfx.DWrite()->CreateEllipsisTrimmingSign(out.Get(), &sign))) out->SetTrimming(&tr, sign.Get()); }
+        };
+        mkfmt(L"Segoe UI Variable Text", 13.5f, DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_navFmt);
+        mkfmt(L"Segoe UI Variable Text", 11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true,  true,  g_secFmt);
+        mkfmt(L"Segoe Fluent Icons",     15.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_fluentFmt);
+        g_fluentFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        mkfmt(L"Segoe UI Variable Display", 18.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, true, g_homeHeadFmt);
+        mkfmt(L"Segoe UI Variable Text", 16.f,  DWRITE_FONT_WEIGHT_SEMI_BOLD, false, false, g_detHeadFmt);
+        mkfmt(L"Segoe UI Variable Text", 12.f,  DWRITE_FONT_WEIGHT_NORMAL,    true,  true,  g_detKeyFmt);
     }
     catch (const std::exception& e) { MessageBoxA(g_hwnd, e.what(), "Crash — init failed", MB_ICONERROR); return 2; }
 
     g_pro = IsLicensed();
+    BuildNav();   // sidebar + Home model (known folders + drives)
 
     // Restore session, or start fresh at the home folder.
     std::wstring home;

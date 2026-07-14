@@ -17,6 +17,11 @@ public:
     // `large` selects the 32px system icon (grid) vs the 16px one (details).
     ID2D1Bitmap* Get(ID2D1DeviceContext* dc, const FileEntry& e, bool large);
 
+    // Real icon for a specific path (folder/drive/file) — used by the navigation
+    // sidebar and Home page, where the distinct known-folder/drive icons matter.
+    // Keyed by path (a handful of local roots), so the SHGetFileInfo touch is rare.
+    ID2D1Bitmap* GetForPath(ID2D1DeviceContext* dc, const std::wstring& path, bool large);
+
 private:
     ComPtr<ID2D1Bitmap> Resolve(ID2D1DeviceContext* dc, const FileEntry& e, bool large);
     ComPtr<ID2D1Bitmap> FromHIcon(ID2D1DeviceContext* dc, HICON hic);

@@ -20,6 +20,26 @@ ID2D1Bitmap* IconCache::Get(ID2D1DeviceContext* dc, const FileEntry& e, bool lar
     return raw;
 }
 
+ID2D1Bitmap* IconCache::GetForPath(ID2D1DeviceContext* dc, const std::wstring& path, bool large)
+{
+    if (owner_ != dc) { map_.clear(); owner_ = dc; }
+    std::wstring key = (large ? L"LP|" : L"SP|") + path;
+    auto it = map_.find(key);
+    if (it != map_.end()) return it->second.Get();
+
+    ComPtr<ID2D1Bitmap> bmp;
+    SHFILEINFOW sfi{};
+    if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi),
+            SHGFI_ICON | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON)) && sfi.hIcon)
+    {
+        bmp = FromHIcon(dc, sfi.hIcon);
+        DestroyIcon(sfi.hIcon);
+    }
+    ID2D1Bitmap* raw = bmp.Get();
+    map_.emplace(std::move(key), std::move(bmp));
+    return raw;
+}
+
 ComPtr<ID2D1Bitmap> IconCache::Resolve(ID2D1DeviceContext* dc, const FileEntry& e, bool large)
 {
     HICON hic = nullptr;
